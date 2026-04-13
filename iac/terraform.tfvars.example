@@ -1,0 +1,104 @@
+# Example file for sensitive data and configuration variables.
+# Copy this file to 'terraform.tfvars' and fill in your values.
+
+# ----------------------------------------------------------------
+# Proxmox API (mandatory)
+# ----------------------------------------------------------------
+proxmox_api_url   = "https://10.x.x.x:8006/api2/json"
+proxmox_api_token = "root@pam!opentofu=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+# Set to false if you have a valid TLS certificate on Proxmox
+proxmox_insecure = true
+
+# SSH user to access Proxmox nodes (default: root)
+# proxmox_ssh_username = "root"
+
+# ----------------------------------------------------------------
+# SSH Access (mandatory)
+# ----------------------------------------------------------------
+ssh_public_key = "ssh-rsa AAAAB3NzaC1yc... myuser@myworkstation"
+
+# ----------------------------------------------------------------
+# VM Configuration (optional — default values below)
+# Each entry: node_name, and network_interfaces
+# ----------------------------------------------------------------
+# vm_config = {
+#   "vm-hc1" = {
+#     node_name = "srv-tlm-hc1"
+#     network_interfaces = [
+#       {
+#         bridge  = "vmbr0"
+#         address = "10.0.2.1/24"
+#         gateway = "10.0.2.254"
+#         # vlan_id = 10
+#       },
+#       {
+#         bridge  = "vmbr_ceph"
+#         address = "10.0.1.1/24"
+#         # vlan_id = 20
+#       }
+#     ]
+#   }
+#   "vm-hc2" = {
+#     node_name = "srv-tlm-hc2"
+#     network_interfaces = [
+#       {
+#         bridge  = "vmbr0"
+#         address = "10.0.2.2/24"
+#         gateway = "10.0.2.254"
+#       },
+#       {
+#         bridge  = "vmbr_ceph"
+#         address = "10.0.1.2/24"
+#       }
+#     ]
+#   }
+#   "vm-hc3" = {
+#     node_name = "srv-tlm-hc3"
+#     network_interfaces = [
+#       {
+#         bridge  = "vmbr0"
+#         address = "10.0.2.3/24"
+#         gateway = "10.0.2.254"
+#       },
+#       {
+#         bridge  = "vmbr_ceph"
+#         address = "10.0.1.3/24"
+#       }
+#     ]
+#   }
+# }
+
+# ----------------------------------------------------------------
+# Optional parameters (reasonable default values)
+# ----------------------------------------------------------------
+
+# Cloud-Init Image
+# ubuntu_cloud_image_url      = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+# ubuntu_cloud_image_filename = "ubuntu-24.04-noble-server-cloudimg-amd64.img"
+# image_datastore_id          = "local"
+
+# VM Resources
+# vm_machine_type      = "q35"     # "q35" (recommended for PCIe/UEFI) or "pc" (Legacy)
+# vm_bios              = "seabios" # "seabios" or "ovmf" (UEFI)
+# vm_vga_type          = "qxl"     # "qxl" (SPICE), "std" (Default), "serial0", "vmware"
+# vm_keyboard_layout   = "fr"      # "fr", "en-us", etc.
+# vm_cpu_cores         = 16
+# vm_cpu_type          = "x86-64-v2-AES"
+# vm_memory_mb         = 24576   # 24 GiB
+# vm_disk_size_gb      = 120
+# vm_disk_datastore_id = "local-lvm"
+
+# Automatic Startup
+# vm_start_on_boot = true
+
+# Proxmox Tags
+# vm_tags = ["k3s", "opentofu"]
+
+
+# Cloud-Init user
+# vm_user = "ubuntu"
+
+# DNS configuration (optional)
+# dns_servers = ["1.1.1.1", "1.0.0.1"]
+# dns_domain  = "home.lan"
