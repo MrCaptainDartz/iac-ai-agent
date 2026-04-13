@@ -4,3 +4,9 @@
   become: true
   roles:
     - ollama
+
+- name: Install and configure OpenClaw
+  hosts: openclaw
+  become: true
+  roles:
+    - openclaw

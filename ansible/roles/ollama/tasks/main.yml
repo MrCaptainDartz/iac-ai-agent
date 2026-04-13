@@ -15,13 +15,14 @@
 - name: Execute Ollama installation script
   ansible.builtin.command: /tmp/install_ollama.sh
   when: not ollama_bin.stat.exists
-  register: install_ollama
+  changed_when: not ollama_bin.stat.exists
+  register: ollama_install
 
 - name: Ensure Ollama service is started and enabled
   ansible.builtin.systemd:
     name: ollama
     state: started
-    enabled: yes
+    enabled: true
 
 - name: Ollama successfully installed!
   ansible.builtin.debug:
