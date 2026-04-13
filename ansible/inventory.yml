@@ -1,0 +1,12 @@
+---
+all:
+  hosts:
+    openclaw:
+      ansible_host: 10.20.4.1
+    hermes:
+      ansible_host: 10.20.4.2
+  vars:
+    ansible_user: ubuntu
+    ansible_python_interpreter: /usr/bin/python3
+    # Optional: if you have specific SSH keys, otherwise it uses the default key from your ssh agent
+    # ansible_ssh_private_key_file: ~/.ssh/id_rsa

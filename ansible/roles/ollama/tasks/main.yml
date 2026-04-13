@@ -1,0 +1,28 @@
+---
+# tasks file for ollama
+- name: Check if Ollama is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/ollama
+  register: ollama_bin
+
+- name: Download Ollama installation script
+  ansible.builtin.get_url:
+    url: https://ollama.com/install.sh
+    dest: /tmp/install_ollama.sh
+    mode: '0755'
+  when: not ollama_bin.stat.exists
+
+- name: Execute Ollama installation script
+  ansible.builtin.command: /tmp/install_ollama.sh
+  when: not ollama_bin.stat.exists
+  register: install_ollama
+
+- name: Ensure Ollama service is started and enabled
+  ansible.builtin.systemd:
+    name: ollama
+    state: started
+    enabled: yes
+
+- name: Ollama successfully installed!
+  ansible.builtin.debug:
+    msg: "Ollama is ready on {{ inventory_hostname }}"

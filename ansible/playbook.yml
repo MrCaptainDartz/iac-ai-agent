@@ -1,0 +1,6 @@
+---
+- name: Install and configure Ollama on AI agents
+  hosts: all
+  become: true
+  roles:
+    - ollama
