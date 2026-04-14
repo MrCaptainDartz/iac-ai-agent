@@ -7,13 +7,15 @@
     - essential-packages
     - nvm
     - ollama
-
   post_tasks:
     - name: Reboot machine to apply kernel updates
       ansible.builtin.reboot:
         msg: "Rebooting machine to apply any pending kernel updates"
-# - name: Install and configure OpenClaw
-#   hosts: openclaw
-#   become: true
-#   roles:
-#     - openclaw
+
+    - name: VM Ready for OpenClaw !
+      ansible.builtin.debug:
+        msg: |
+          "{{ inventory_hostname }} is ready to install OpenClaw, unfortunately this cannot be automated with Ollama yet."
+          "Please continue with the OpenClaw installation manually."
+          "Connect to the VM with 'ssh {{ ansible_user }}@{{ ansible_host }}'"
+          "Then run 'ollama launch openclaw' to start the installation."

@@ -58,3 +58,15 @@
   become_user: "{{ nvm_user }}"
   register: nvm_node_install
   changed_when: "'is already installed' not in nvm_node_install.stdout and 'is already installed' not in nvm_node_install.stderr"
+
+- name: Update global npm packages
+  ansible.builtin.shell: |
+    export NVM_DIR="{{ nvm_dir }}"
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+    npm update -g
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ nvm_user }}"
+  register: nvm_npm_update_output
+  changed_when: "nvm_npm_update_output.stdout | trim | length > 0"
