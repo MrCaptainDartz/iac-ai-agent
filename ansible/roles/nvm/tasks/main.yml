@@ -1,7 +1,7 @@
 ---
 - name: Ensure dependencies are installed
   ansible.builtin.apt:
-    name: 
+    name:
       - curl
       - git
     state: present

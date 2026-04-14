@@ -3,6 +3,7 @@
   hosts: all
   become: true
   roles:
+    - system_timezone
     - nvm
     - ollama
 

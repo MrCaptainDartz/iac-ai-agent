@@ -1,0 +1,5 @@
+---
+- name: Set system timezone
+  community.general.timezone:
+    name: "{{ system_timezone_value }}"
+  become: true
