@@ -4,6 +4,7 @@
   become: true
   roles:
     - system_timezone
+    - essential-packages
     - nvm
     - ollama
 

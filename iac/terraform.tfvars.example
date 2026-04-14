@@ -97,7 +97,7 @@ ssh_public_key = "ssh-rsa AAAAB3NzaC1yc... myuser@myworkstation"
 
 
 # Cloud-Init user
-# vm_user = "ubuntu"
+# vm_user = "openclaw"
 
 # DNS configuration (optional)
 # dns_servers = ["1.1.1.1", "1.0.0.1"]
