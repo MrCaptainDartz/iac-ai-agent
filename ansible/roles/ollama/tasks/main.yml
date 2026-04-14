@@ -62,6 +62,13 @@
     - "'already signed in' not in ollama_signin_result.stdout and 'already signed in' not in ollama_signin_result.stderr"
     - "'already signed in' not in ollama_verify_signin.stdout and 'already signed in' not in ollama_verify_signin.stderr"
 
+- name: Pull requested Ollama models
+  ansible.builtin.command: "ollama pull {{ item }}"
+  loop: "{{ ollama_models | default([]) }}"
+  register: ollama_pull_status
+  changed_when: false
+  # Note: `changed_when: false` to keep playbook clean, as Ollama will just verify layers if already pulled
+
 - name: Ollama successfully installed!
   ansible.builtin.debug:
     msg: "Ollama is ready on {{ inventory_hostname }}"

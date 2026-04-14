@@ -3,3 +3,7 @@
 openclaw_model: glm-5.1:cloud
 nvm_version: "v0.40.4"
 system_timezone_value: "Europe/Paris"
+ollama_models:
+  - minimax-m2.7:cloud
+  - glm-5.1:cloud
+  - qwen3-embedding:0.6b
