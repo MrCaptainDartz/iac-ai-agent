@@ -1,0 +1,60 @@
+---
+- name: Ensure dependencies are installed
+  ansible.builtin.apt:
+    name: 
+      - curl
+      - git
+    state: present
+    update_cache: true
+  become: true
+
+- name: Get nvm user home directory
+  ansible.builtin.user:
+    name: "{{ nvm_user }}"
+  register: nvm_user_info
+
+- name: Define nvm_dir fact
+  ansible.builtin.set_fact:
+    nvm_dir: "{{ nvm_user_info.home }}/.nvm"
+
+- name: Check if nvm is installed
+  ansible.builtin.stat:
+    path: "{{ nvm_dir }}/nvm.sh"
+  register: nvm_stat
+
+- name: Download nvm install script
+  ansible.builtin.get_url:
+    url: "https://raw.githubusercontent.com/nvm-sh/nvm/{{ nvm_version }}/install.sh"
+    dest: "{{ nvm_user_info.home }}/nvm_install.sh"
+    mode: '0700'
+  become: true
+  become_user: "{{ nvm_user }}"
+  when: not nvm_stat.stat.exists
+
+- name: Execute nvm install script
+  ansible.builtin.command:
+    cmd: "{{ nvm_user_info.home }}/nvm_install.sh"
+    creates: "{{ nvm_dir }}/nvm.sh"
+  become: true
+  become_user: "{{ nvm_user }}"
+  when: not nvm_stat.stat.exists
+
+- name: Remove nvm install script
+  ansible.builtin.file:
+    path: "{{ nvm_user_info.home }}/nvm_install.sh"
+    state: absent
+  become: true
+  become_user: "{{ nvm_user }}"
+  when: not nvm_stat.stat.exists
+
+- name: Install Node.js LTS via NVM
+  ansible.builtin.shell: |
+    export NVM_DIR="{{ nvm_dir }}"
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+    nvm install --lts && nvm use --lts && nvm alias default 'lts/*'
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ nvm_user }}"
+  register: nvm_node_install
+  changed_when: "'is already installed' not in nvm_node_install.stdout and 'is already installed' not in nvm_node_install.stderr"

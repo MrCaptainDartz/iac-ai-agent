@@ -3,10 +3,11 @@
   hosts: all
   become: true
   roles:
+    - nvm
     - ollama
 
-- name: Install and configure OpenClaw
-  hosts: openclaw
-  become: true
-  roles:
-    - openclaw
+# - name: Install and configure OpenClaw
+#   hosts: openclaw
+#   become: true
+#   roles:
+#     - openclaw
