@@ -8,6 +8,10 @@
     - nvm
     - ollama
 
+  post_tasks:
+    - name: Reboot machine to apply kernel updates
+      ansible.builtin.reboot:
+        msg: "Rebooting machine to apply any pending kernel updates"
 # - name: Install and configure OpenClaw
 #   hosts: openclaw
 #   become: true
