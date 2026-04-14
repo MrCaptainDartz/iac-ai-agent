@@ -24,6 +24,44 @@
     state: started
     enabled: true
 
+- name: Run Ollama signin to generate OAuth link
+  ansible.builtin.command: ollama signin
+  register: ollama_signin_result
+  changed_when: false
+
+- name: Pause to allow user to complete Ollama OAuth sign-in
+  ansible.builtin.pause:
+    prompt: |
+      
+      ===============================================================
+      Action Required: Ollama Authentication
+      ===============================================================
+      Ollama needs you to authenticate to use Cloud models.
+      Please open the following link in your browser to sign in:
+      
+      {{ ollama_signin_result.stdout }}
+      
+      Once you have successfully signed in on the web, come back here.
+      ===============================================================
+      Press ENTER to continue...
+  when: "'already signed in' not in ollama_signin_result.stdout and 'already signed in' not in ollama_signin_result.stderr"
+
+- name: Verify Ollama sign-in status
+  ansible.builtin.command: ollama signin
+  register: ollama_verify_signin
+  changed_when: false
+  when: "'already signed in' not in ollama_signin_result.stdout and 'already signed in' not in ollama_signin_result.stderr"
+
+- name: Fail if Ollama authentication was not completed
+  ansible.builtin.fail:
+    msg: >
+      Ollama authentication failed!
+      You probably didn't complete the sign-in process via the OAuth link.
+      Please rerun the Playbook and complete the connection step in your web browser.
+  when:
+    - "'already signed in' not in ollama_signin_result.stdout and 'already signed in' not in ollama_signin_result.stderr"
+    - "'already signed in' not in ollama_verify_signin.stdout and 'already signed in' not in ollama_verify_signin.stderr"
+
 - name: Ollama successfully installed!
   ansible.builtin.debug:
     msg: "Ollama is ready on {{ inventory_hostname }}"
