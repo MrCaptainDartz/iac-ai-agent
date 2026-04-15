@@ -5,6 +5,8 @@
   roles:
     - system_timezone
     - essential-packages
+    - docker
+    - firewall
     - nvm
     - ollama
   post_tasks:

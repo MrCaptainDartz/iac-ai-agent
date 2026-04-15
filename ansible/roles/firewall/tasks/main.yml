@@ -1,0 +1,85 @@
+---
+- name: Install UFW
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+    update_cache: true
+
+- name: Set UFW default policies
+  community.general.ufw:
+    direction: "{{ item.direction }}"
+    policy: "{{ item.policy }}"
+  loop:
+    - { direction: 'incoming', policy: 'deny' }
+    - { direction: 'outgoing', policy: 'allow' }
+    - { direction: 'routed', policy: 'deny' }
+
+- name: Allow SSH on port 22
+  community.general.ufw:
+    rule: allow
+    port: '22'
+    proto: tcp
+    comment: 'SSH'
+
+- name: Get default network interface
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      ip route | grep default | awk '{print $5}' | head -n1
+    executable: /bin/bash
+  register: firewall_default_interface
+  changed_when: false
+
+- name: Validate default network interface was detected
+  ansible.builtin.assert:
+    that:
+      - firewall_default_interface.stdout is defined
+      - firewall_default_interface.stdout | length > 0
+    fail_msg: "Failed to detect default network interface. Cannot configure firewall rules safely."
+    success_msg: "Default network interface detected: {{ firewall_default_interface.stdout }}"
+
+- name: Create UFW after.rules for Docker isolation
+  ansible.builtin.blockinfile:
+    path: /etc/ufw/after.rules
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - Docker isolation"
+    insertbefore: "^COMMIT$"
+    block: |
+      # Docker port isolation - block all forwarded traffic by default
+      :DOCKER-USER - [0:0]
+
+      # Allow established connections
+      -A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+      # Allow localhost
+      -A DOCKER-USER -i lo -j ACCEPT
+
+      # Block all other forwarded traffic to Docker containers from external interface
+      -A DOCKER-USER -i {{ firewall_default_interface.stdout }} -j DROP
+    create: false
+
+- name: Create Docker daemon config directory
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    mode: '0755'
+
+- name: Configure Docker daemon to work with UFW
+  ansible.builtin.template:
+    src: daemon.json.j2
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Restart docker
+  ansible.builtin.systemd:
+    name: docker
+    state: restarted
+
+- name: Enable UFW
+  community.general.ufw:
+    state: enabled
+
+- name: Reload UFW
+  community.general.ufw:
+    state: reloaded
