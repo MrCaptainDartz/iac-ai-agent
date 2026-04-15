@@ -66,7 +66,7 @@ variable "vm_config" {
     "vm-ai" = {
       node_name = "pve-node1"
       network_interfaces = [
-        { bridge = "vmbr0", address = "10.0.0.1/24", gateway = "10.0.0.254" }
+        { bridge = "vmbr0", address = "10.0.0.1/24", gateway = "10.0.0.254", vlan_id = 100 }
       ]
     }
   }

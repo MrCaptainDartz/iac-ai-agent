@@ -20,6 +20,7 @@ ssh_public_key = "ssh-rsa AAAAB3NzaC1yc... myuser@myworkstation"
 
 # ----------------------------------------------------------------
 # VM Configuration (optional — default values below)
+# gateway and vlan_id are optional
 # Each entry: node_name, and network_interfaces
 # ----------------------------------------------------------------
 # vm_config = {
@@ -30,6 +31,7 @@ ssh_public_key = "ssh-rsa AAAAB3NzaC1yc... myuser@myworkstation"
 #         bridge  = "vmbr0"
 #         address = "10.0.0.1/24"
 #         gateway = "10.0.0.254"
+#         vlan_id = 100
 #       }
 #     ]
 #   }
