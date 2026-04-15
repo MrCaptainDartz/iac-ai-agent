@@ -23,47 +23,13 @@ ssh_public_key = "ssh-rsa AAAAB3NzaC1yc... myuser@myworkstation"
 # Each entry: node_name, and network_interfaces
 # ----------------------------------------------------------------
 # vm_config = {
-#   "vm-hc1" = {
-#     node_name = "srv-tlm-hc1"
+#   "vm-ai" = {
+#     node_name = "pve-node1"
 #     network_interfaces = [
 #       {
 #         bridge  = "vmbr0"
-#         address = "10.0.2.1/24"
-#         gateway = "10.0.2.254"
-#         # vlan_id = 10
-#       },
-#       {
-#         bridge  = "vmbr_ceph"
-#         address = "10.0.1.1/24"
-#         # vlan_id = 20
-#       }
-#     ]
-#   }
-#   "vm-hc2" = {
-#     node_name = "srv-tlm-hc2"
-#     network_interfaces = [
-#       {
-#         bridge  = "vmbr0"
-#         address = "10.0.2.2/24"
-#         gateway = "10.0.2.254"
-#       },
-#       {
-#         bridge  = "vmbr_ceph"
-#         address = "10.0.1.2/24"
-#       }
-#     ]
-#   }
-#   "vm-hc3" = {
-#     node_name = "srv-tlm-hc3"
-#     network_interfaces = [
-#       {
-#         bridge  = "vmbr0"
-#         address = "10.0.2.3/24"
-#         gateway = "10.0.2.254"
-#       },
-#       {
-#         bridge  = "vmbr_ceph"
-#         address = "10.0.1.3/24"
+#         address = "10.0.0.1/24"
+#         gateway = "10.0.0.254"
 #       }
 #     ]
 #   }
@@ -93,7 +59,7 @@ ssh_public_key = "ssh-rsa AAAAB3NzaC1yc... myuser@myworkstation"
 # vm_start_on_boot = true
 
 # Proxmox Tags
-# vm_tags = ["k3s", "opentofu"]
+# vm_tags = ["openclaw", "opentofu"]
 
 
 # Cloud-Init user

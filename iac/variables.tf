@@ -53,7 +53,7 @@ variable "image_datastore_id" {
 
 variable "vm_config" {
   type = map(object({
-    node_name          = string
+    node_name = string
     network_interfaces = list(object({
       bridge  = string
       address = string
@@ -63,25 +63,10 @@ variable "vm_config" {
   }))
   description = "Map of VM configurations: key = VM name, value = node, and a list of network interfaces (bridge, address with CIDR, gateway, vlan_id). VM IDs are assigned automatically."
   default = {
-    "vm-hc1" = {
-      node_name = "srv-tlm-hc1"
+    "vm-ai" = {
+      node_name = "pve-node1"
       network_interfaces = [
-        { bridge = "vmbr0", address = "10.20.4.1/24", gateway = "10.20.4.254" },
-        { bridge = "vmbr_ceph", address = "10.20.3.1/24" }
-      ]
-    }
-    "vm-hc2" = {
-      node_name = "srv-tlm-hc2"
-      network_interfaces = [
-        { bridge = "vmbr0", address = "10.20.4.2/24", gateway = "10.20.4.254" },
-        { bridge = "vmbr_ceph", address = "10.20.3.2/24" }
-      ]
-    }
-    "vm-hc3" = {
-      node_name = "srv-tlm-hc3"
-      network_interfaces = [
-        { bridge = "vmbr0", address = "10.20.4.3/24", gateway = "10.20.4.254" },
-        { bridge = "vmbr_ceph", address = "10.20.3.3/24" }
+        { bridge = "vmbr0", address = "10.0.0.1/24", gateway = "10.0.0.254" }
       ]
     }
   }
@@ -178,8 +163,8 @@ variable "vm_start_on_boot" {
 
 variable "vm_tags" {
   type        = list(string)
-  description = "Tags to apply to all VMs in Proxmox (e.g., [\"k3s\", \"opentofu\"])"
-  default     = ["k3s", "opentofu"]
+  description = "Tags to apply to all VMs in Proxmox (e.g., [\"openclaw\", \"opentofu\"])"
+  default     = ["openclaw", "opentofu"]
 }
 
 # ============================================================
@@ -194,7 +179,7 @@ variable "vm_tags" {
 variable "vm_user" {
   type        = string
   description = "Default SSH user for the VMs (injected via Cloud-Init)"
-  default     = "ubuntu"
+  default     = "openclaw"
 }
 
 variable "ssh_public_key" {
