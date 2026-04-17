@@ -63,7 +63,6 @@ cp ansible/inventory/inventory.yml.example ansible/inventory/inventory.yml
 Open this file to customize:
 
 - `ollama_models`: Add or remove the default models you want Ollama to pull during setup (e.g., `glm-5.1:cloud`).
-- `openclaw_model`: Define the primary AI model used by OpenClaw to ensure consistency across the setup.
 - `system_timezone_value`: Set your desired system timezone (defaults to `Europe/Paris`, change it to match your local region).
 - `nvm_version`: Specify the Node Version Manager version if an update is needed.
 

@@ -1,6 +1,5 @@
 ---
 # Global variables for the project
-openclaw_model: glm-5.1:cloud
 nvm_version: "v0.40.4"
 system_timezone_value: "Europe/Paris"
 ollama_models:
