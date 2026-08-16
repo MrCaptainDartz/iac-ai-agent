@@ -8,49 +8,60 @@
 - name: Install essential system tools (Linux - apt)
   ansible.builtin.apt:
     name:
+      # Hypervisor integration (Proxmox VE)
+      - qemu-guest-agent
       # Editors
       - vim
       - nano
       # Version control
       - git
       - git-lfs
+      # Search & Code exploration
+      - ripgrep
+      - fd-find
       # Network tools
       - curl
       - wget
       - netcat-openbsd
-      - net-tools
       - dnsutils
       - iputils-ping
       - traceroute
       - tcpdump
       - nmap
       - socat
-      - telnet
-      # Debugging tools
-      - strace
-      - lsof
-      - gdb
+      # Performance & Hardware/GPU Monitoring
+      - btop
       - htop
       - iotop
       - iftop
       - sysstat
       - procps
-      # System utilities
+      - nvtop
+      # Debugging tools
+      - strace
+      - lsof
+      # System utilities & Archives
       - tmux
       - tree
       - jq
       - unzip
+      - zstd
       - rsync
       - less
       - file
-      # Build essentials for development
+      # Development & Build tools
       - build-essential
-      # ACL
+      # Security & ACL
       - acl
-      # Firewall
       - ufw
     state: present
     update_cache: true
+
+- name: Ensure qemu-guest-agent service is started and enabled
+  ansible.builtin.systemd_service:
+    name: qemu-guest-agent
+    state: started
+    enabled: true
 
 - name: Install additional custom system packages
   ansible.builtin.apt:
@@ -58,31 +69,3 @@
     state: present
     update_cache: true
   when: essential_packages_extra is defined and (essential_packages_extra | length > 0)
-
-- name: Deploy global vim configuration (Linux)
-  ansible.builtin.template:
-    src: vimrc.j2
-    dest: /etc/vim/vimrc.local
-    owner: root
-    group: root
-    mode: '0644'
-
-- name: Configure git globally
-  community.general.git_config:
-    name: "{{ item.name }}"
-    scope: global
-    value: "{{ item.value }}"
-  become: true
-  become_user: "{{ ansible_user }}"
-  loop:
-    - { name: 'init.defaultBranch', value: 'main' }
-    - { name: 'pull.rebase', value: 'false' }
-    - { name: 'color.ui', value: 'auto' }
-    - { name: 'core.editor', value: 'vim' }
-    - { name: 'alias.st', value: 'status' }
-    - { name: 'alias.co', value: 'checkout' }
-    - { name: 'alias.br', value: 'branch' }
-    - { name: 'alias.ci', value: 'commit' }
-    - { name: 'alias.unstage', value: 'reset HEAD --' }
-    - { name: 'alias.last', value: 'log -1 HEAD' }
-    - { name: 'alias.lg', value: 'log --oneline --graph --decorate --all' }

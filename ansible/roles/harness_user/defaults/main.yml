@@ -1,0 +1,4 @@
+---
+# defaults file for harness_user
+harness_user_name: "{{ harness_name | default('hermes') }}"
+harness_user_ssh_keys: "{{ harness_ssh_keys | default([]) }}"

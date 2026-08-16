@@ -2,4 +2,15 @@
 - name: Set system timezone
   community.general.timezone:
     name: "{{ system_timezone_value }}"
-  become: true
+
+- name: Install systemd-timesyncd for NTP time synchronization
+  ansible.builtin.apt:
+    name: systemd-timesyncd
+    state: present
+    update_cache: true
+
+- name: Ensure systemd-timesyncd service is enabled and started
+  ansible.builtin.systemd_service:
+    name: systemd-timesyncd
+    state: started
+    enabled: true

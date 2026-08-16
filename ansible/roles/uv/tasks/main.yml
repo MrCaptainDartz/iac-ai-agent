@@ -1,0 +1,44 @@
+---
+# tasks file for uv
+
+- name: Check if uv is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/uv
+  register: uv_binary_stat
+
+- name: Download and install uv standalone binary
+  ansible.builtin.unarchive:
+    src: "{{ uv_binary_url }}"
+    dest: /usr/local/bin
+    remote_src: true
+    extra_opts:
+      - --strip-components=1
+    mode: '0755'
+    owner: root
+    group: root
+  when: not uv_binary_stat.stat.exists
+
+- name: Check if requested Python version is installed via uv
+  ansible.builtin.command:
+    cmd: "uv python find {{ uv_python_version }}"
+  become: true
+  become_user: "{{ uv_user_name }}"
+  register: uv_python_find_result
+  changed_when: false
+  failed_when: false
+  environment:
+    PATH: "/usr/local/bin:{{ ansible_facts['env']['PATH'] | default('/usr/bin:/bin') }}"
+
+- name: Install Python version via uv for harness user
+  ansible.builtin.command:
+    cmd: "uv python install {{ uv_python_version }}"
+  become: true
+  become_user: "{{ uv_user_name }}"
+  when: uv_python_find_result.rc != 0
+  changed_when: uv_python_find_result.rc != 0
+  environment:
+    PATH: "/usr/local/bin:{{ ansible_facts['env']['PATH'] | default('/usr/bin:/bin') }}"
+
+- name: Display uv and Python installation status
+  ansible.builtin.debug:
+    msg: "uv and Python {{ uv_python_version }} are ready for {{ uv_user_name }}"

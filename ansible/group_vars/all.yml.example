@@ -2,14 +2,30 @@
 # Global variables for the project
 # Copy this file to 'all.yml' and customize it according to your needs.
 
+# Harness / Agent configuration
+harness_name: "hermes" # e.g. "hermes", "openclaw", "smolagents" (lowercase alphanumeric + hyphens)
+
+# Optional additional SSH public keys for the harness user
+harness_ssh_keys: []
+
+# SSH Security Configuration
+ssh_allow_tcp_forwarding: false # Set to true if SSH port forwarding/tunneling is needed
+
+# Container runtime & gVisor configuration
+gvisor_enabled: true
+gvisor_default: true # When true, gVisor (runsc) is used as the default OCI runtime for all containers
+
 # Node.js / NVM configuration
 nvm_version: "v0.40.6"
 nvm_node_version: "lts/*" # e.g. "lts/*", "22", "20"
 
+# Python / uv configuration
+uv_python_version: "3.14" # Python version managed by uv (e.g. "3.14", "3.13", "3.12")
+
 # System configuration
 system_timezone_value: "Europe/Paris"
 
-# Additional custom system packages to install (e.g. ["nvtop", "btop", "zsh"])
+# Additional custom system packages to install (e.g. ["zsh", "fish"])
 essential_packages_extra: []
 
 # Ollama configuration

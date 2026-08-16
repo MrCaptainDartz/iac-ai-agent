@@ -1,0 +1,22 @@
+---
+# handlers for security_hardening
+
+- name: Restart SSH service
+  ansible.builtin.systemd_service:
+    name: ssh
+    state: restarted
+
+- name: Restart Fail2ban service
+  ansible.builtin.systemd_service:
+    name: fail2ban
+    state: restarted
+
+- name: Restart Journald service
+  ansible.builtin.systemd_service:
+    name: systemd-journald
+    state: restarted
+
+- name: Restart Auditd service
+  ansible.builtin.service:
+    name: auditd
+    state: restarted

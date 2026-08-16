@@ -1,0 +1,10 @@
+# Fail2ban SSH jail configuration (Ansible Managed)
+[sshd]
+enabled = true
+port = ssh
+mode = aggressive
+maxretry = 5
+findtime = 600
+bantime = 3600
+banaction = ufw
+ignoreip = {{ security_hardening_fail2ban_ignoreip | default('127.0.0.1/8 ::1') }}

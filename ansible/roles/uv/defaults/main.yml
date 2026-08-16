@@ -1,0 +1,5 @@
+---
+# defaults file for uv
+uv_user_name: "{{ harness_name | default('hermes') }}"
+uv_python_version: "3.14"
+uv_binary_url: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz"

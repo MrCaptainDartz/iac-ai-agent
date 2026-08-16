@@ -1,0 +1,4 @@
+# Systemd Journald limits (Ansible Managed)
+[Journal]
+Storage=persistent
+SystemMaxUse={{ security_hardening_journald_limit | default('500M') }}

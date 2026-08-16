@@ -1,0 +1,136 @@
+---
+# tasks file for podman_gvisor
+
+- name: Install Podman and rootless container dependencies
+  ansible.builtin.apt:
+    name:
+      - podman
+      - podman-docker
+      - podman-compose
+      - docker-compose-v2
+      - uidmap
+      - slirp4netns
+      - fuse-overlayfs
+      - dbus-user-session
+      - curl
+      - ca-certificates
+    state: present
+    update_cache: true
+
+- name: Silence Docker emulation banner
+  ansible.builtin.file:
+    path: /etc/containers/nodocker
+    state: touch
+    mode: '0644'
+    owner: root
+    group: root
+    modification_time: preserve
+    access_time: preserve
+
+- name: Create docker-compose compatibility symlink
+  ansible.builtin.file:
+    src: /usr/bin/podman-compose
+    dest: /usr/local/bin/docker-compose
+    state: link
+    force: true
+
+- name: Ensure subordinate UID range exists for harness user
+  ansible.builtin.lineinfile:
+    path: /etc/subuid
+    line: "{{ podman_gvisor_harness_name }}:100000:65536"
+    create: true
+    mode: '0644'
+
+- name: Ensure subordinate GID range exists for harness user
+  ansible.builtin.lineinfile:
+    path: /etc/subgid
+    line: "{{ podman_gvisor_harness_name }}:100000:65536"
+    create: true
+    mode: '0644'
+
+- name: Create systemd user service drop-in directory for cgroup delegation
+  ansible.builtin.file:
+    path: /etc/systemd/system/user@.service.d
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+
+- name: Configure cgroup v2 controller delegation for user sessions
+  ansible.builtin.template:
+    src: delegate.conf.j2
+    dest: /etc/systemd/system/user@.service.d/delegate.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload systemd daemon
+
+- name: Check if gVisor runsc is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/runsc
+  register: podman_gvisor_runsc_stat
+  when: podman_gvisor_enabled | default(true)
+
+- name: Download and install gVisor runsc binary
+  ansible.builtin.get_url:
+    url: "{{ podman_gvisor_binary_url }}"
+    dest: /usr/local/bin/runsc
+    mode: '0755'
+    owner: root
+    group: root
+  when:
+    - podman_gvisor_enabled | default(true)
+    - not podman_gvisor_runsc_stat.stat.exists
+
+- name: Deploy gVisor runsc rootless wrapper script
+  ansible.builtin.template:
+    src: runsc-wrapper.j2
+    dest: /usr/local/bin/runsc-wrapper
+    owner: root
+    group: root
+    mode: '0755'
+  when: podman_gvisor_enabled | default(true)
+
+- name: Create Podman configuration drop-in directory
+  ansible.builtin.file:
+    path: /etc/containers/containers.conf.d
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+  when: podman_gvisor_enabled | default(true)
+
+- name: Configure gVisor runtime for Podman
+  ansible.builtin.template:
+    src: gvisor.conf.j2
+    dest: /etc/containers/containers.conf.d/gvisor.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: podman_gvisor_enabled | default(true)
+
+- name: Get harness user UID
+  ansible.builtin.command:
+    cmd: "id -u {{ podman_gvisor_harness_name }}"
+  register: podman_gvisor_uid_result
+  changed_when: false
+
+- name: Ensure user runtime directory exists
+  ansible.builtin.file:
+    path: "/run/user/{{ podman_gvisor_uid_result.stdout }}"
+    state: directory
+    owner: "{{ podman_gvisor_harness_name }}"
+    group: "{{ podman_gvisor_harness_name }}"
+    mode: '0700'
+
+- name: Enable and start rootless Podman socket for harness user
+  ansible.builtin.systemd_service:
+    name: podman.socket
+    scope: user
+    state: started
+    enabled: true
+  become: true
+  become_user: "{{ podman_gvisor_harness_name }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ podman_gvisor_uid_result.stdout }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ podman_gvisor_uid_result.stdout }}/bus"

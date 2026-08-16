@@ -1,0 +1,9 @@
+# Podman runtime configuration for gVisor (runsc)
+[engine]
+runtime = "{{ 'runsc' if (podman_gvisor_default | default(true)) else 'crun' }}"
+compose_warning_logs = false
+
+[engine.runtimes]
+runsc = [
+    "/usr/local/bin/runsc-wrapper"
+]

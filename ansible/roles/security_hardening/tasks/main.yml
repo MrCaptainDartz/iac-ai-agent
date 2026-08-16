@@ -1,0 +1,255 @@
+---
+# tasks file for security_hardening
+
+- name: Deploy SSH security hardening configuration
+  ansible.builtin.template:
+    src: 99-security-hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/99-security-hardening.conf
+    owner: root
+    group: root
+    mode: '0600'
+  notify: Restart SSH service
+
+- name: Deploy kernel sysctl security hardening parameters
+  ansible.builtin.template:
+    src: 99-security-hardening.sysctl.j2
+    dest: /etc/sysctl.d/99-security-hardening.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: security_hardening_sysctl_enabled | default(true)
+
+- name: Apply sysctl security parameters
+  ansible.builtin.command:
+    cmd: sysctl --system
+  changed_when: false
+  when: security_hardening_sysctl_enabled | default(true)
+
+- name: Lock root user account password
+  ansible.builtin.user:
+    name: root
+    password_lock: true
+
+- name: Configure resource limits and disable core dumps
+  ansible.builtin.template:
+    src: 99-disable-coredumps.conf.j2
+    dest: /etc/security/limits.d/99-disable-coredumps.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: security_hardening_coredumps_disabled | default(true)
+
+- name: Create systemd coredump configuration directory
+  ansible.builtin.file:
+    path: /etc/systemd/coredump.conf.d
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+  when: security_hardening_coredumps_disabled | default(true)
+
+- name: Disable systemd core dumps storage
+  ansible.builtin.template:
+    src: coredump.conf.j2
+    dest: /etc/systemd/coredump.conf.d/disable.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: security_hardening_coredumps_disabled | default(true)
+
+- name: Install unattended-upgrades packages
+  ansible.builtin.apt:
+    name:
+      - unattended-upgrades
+      - update-notifier-common
+    state: present
+    update_cache: true
+  when: security_hardening_unattended_upgrades_enabled | default(true)
+
+- name: Configure periodic unattended-upgrades
+  ansible.builtin.template:
+    src: 20auto-upgrades.j2
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: '0644'
+  when: security_hardening_unattended_upgrades_enabled | default(true)
+
+- name: Ensure unattended-upgrades service and apt-daily timers are enabled and running
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - unattended-upgrades
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
+  when: security_hardening_unattended_upgrades_enabled | default(true)
+
+- name: Install fail2ban package
+  ansible.builtin.apt:
+    name:
+      - fail2ban
+    state: present
+    update_cache: true
+  when: security_hardening_fail2ban_enabled | default(true)
+
+- name: Create fail2ban jail configuration directory
+  ansible.builtin.file:
+    path: /etc/fail2ban/jail.d
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+  when: security_hardening_fail2ban_enabled | default(true)
+
+- name: Configure fail2ban SSH jail
+  ansible.builtin.template:
+    src: jail-sshd.local.j2
+    dest: /etc/fail2ban/jail.d/sshd.local
+    owner: root
+    group: root
+    mode: '0644'
+  when: security_hardening_fail2ban_enabled | default(true)
+  notify: Restart Fail2ban service
+
+- name: Ensure fail2ban service is enabled and started
+  ansible.builtin.systemd_service:
+    name: fail2ban
+    state: started
+    enabled: true
+  when: security_hardening_fail2ban_enabled | default(true)
+
+- name: Deploy kernel module blacklist configuration
+  ansible.builtin.template:
+    src: 99-security-blacklist.conf.j2
+    dest: /etc/modprobe.d/99-security-blacklist.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: security_hardening_kernel_blacklist_enabled | default(true)
+
+- name: Configure secure default umask in profile.d
+  ansible.builtin.template:
+    src: umask.sh.j2
+    dest: /etc/profile.d/umask.sh
+    owner: root
+    group: root
+    mode: '0644'
+  when: security_hardening_umask_enabled | default(true)
+
+- name: Configure secure default umask in login.defs
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: '^UMASK\s+'
+    line: 'UMASK           027'
+    state: present
+  when: security_hardening_umask_enabled | default(true)
+
+- name: Configure password aging policies in login.defs
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: "^{{ item.key }}\\s+"
+    line: "{{ item.key }}   {{ item.value }}"
+    state: present
+  loop:
+    - { key: 'PASS_MAX_DAYS', value: '90' }
+    - { key: 'PASS_MIN_DAYS', value: '7' }
+    - { key: 'PASS_WARN_AGE', value: '14' }
+  when: security_hardening_password_policy_enabled | default(true)
+
+- name: Install libpam-pwquality for password complexity enforcement
+  ansible.builtin.apt:
+    name: libpam-pwquality
+    state: present
+    update_cache: true
+  when: security_hardening_pwquality_enabled | default(true)
+
+- name: Configure password quality parameters in pwquality.conf
+  ansible.builtin.template:
+    src: pwquality.conf.j2
+    dest: /etc/security/pwquality.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: security_hardening_pwquality_enabled | default(true)
+
+- name: Mask ctrl-alt-del reboot target
+  ansible.builtin.systemd_service:
+    name: ctrl-alt-del.target
+    masked: true
+
+- name: Disable unneeded and telemetry services
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+    masked: true
+  loop:
+    - apport
+    - whoopsie
+    - bluetooth
+    - cups
+    - avahi-daemon
+    - ModemManager
+  failed_when: false
+  when: security_hardening_unused_services_disabled | default(true)
+
+- name: Create journald configuration drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+
+- name: Configure journald persistent storage and size limits
+  ansible.builtin.template:
+    src: 99-journald-limits.conf.j2
+    dest: /etc/systemd/journald.conf.d/99-limits.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart Journald service
+
+- name: Install auditd auditing daemon
+  ansible.builtin.apt:
+    name:
+      - auditd
+      - audispd-plugins
+    state: present
+    update_cache: true
+  when: security_hardening_auditd_enabled | default(true)
+
+- name: Deploy security audit rules
+  ansible.builtin.template:
+    src: 99-security-audit.rules.j2
+    dest: /etc/audit/rules.d/99-security-audit.rules
+    owner: root
+    group: root
+    mode: '0600'
+  when: security_hardening_auditd_enabled | default(true)
+  notify: Restart Auditd service
+
+- name: Ensure auditd service is enabled and started
+  ansible.builtin.service:
+    name: auditd
+    state: started
+    enabled: true
+  when: security_hardening_auditd_enabled | default(true)
+
+- name: Install AppArmor packages
+  ansible.builtin.apt:
+    name:
+      - apparmor
+      - apparmor-utils
+    state: present
+    update_cache: true
+  when: security_hardening_apparmor_enabled | default(true)
+
+- name: Ensure AppArmor service is enabled and started
+  ansible.builtin.systemd_service:
+    name: apparmor
+    state: started
+    enabled: true
+  when: security_hardening_apparmor_enabled | default(true)

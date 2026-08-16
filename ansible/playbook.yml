@@ -11,9 +11,13 @@
   roles:
     - system_timezone
     - essential_packages
-    - docker
+    - developer_config
+    - security_hardening
+    - harness_user
+    - podman_gvisor
     - firewall
     - nvm
+    - uv
     - role: ollama
       when: ollama_enabled | default(true)
   post_tasks:
@@ -31,7 +35,7 @@
       ansible.builtin.debug:
         msg:
           - "{{ inventory_hostname }} is ready!"
-          - "Connect to the VM with 'ssh {{ ansible_user }}@{{ ansible_host }}'"
+          - "Connect to the VM with 'ssh {{ harness_name | default('hermes') }}@{{ ansible_host }}'"
           - >-
             {{ 'Ollama is installed and ready. You can initialize your AI agent.'
                if (ollama_enabled | default(true))

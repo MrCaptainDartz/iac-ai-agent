@@ -1,0 +1,3 @@
+#!/bin/bash
+# Wrapper script for gVisor (runsc) with Podman conmon rootless execution
+exec /usr/local/bin/runsc --ignore-cgroups "$@"

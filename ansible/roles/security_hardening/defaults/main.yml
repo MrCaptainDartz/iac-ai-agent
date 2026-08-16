@@ -1,0 +1,26 @@
+---
+# defaults file for security_hardening
+security_hardening_harness_name: "{{ harness_name | default('hermes') }}"
+security_hardening_admin_user: "{{ ansible_user }}"
+security_hardening_ssh_allowed_users:
+  - "{{ ansible_user }}"
+  - "{{ harness_name | default('hermes') }}"
+security_hardening_ssh_permit_root_login: "no"
+security_hardening_ssh_password_authentication: "no"
+security_hardening_ssh_allow_tcp_forwarding: "{{ 'yes' if (ssh_allow_tcp_forwarding | default(false)) else 'no' }}"
+security_hardening_ssh_client_alive_interval: 300
+security_hardening_ssh_client_alive_count_max: 2
+
+security_hardening_sysctl_enabled: true
+security_hardening_coredumps_disabled: true
+security_hardening_unattended_upgrades_enabled: true
+security_hardening_fail2ban_enabled: true
+security_hardening_fail2ban_ignoreip: "127.0.0.1/8 ::1"
+security_hardening_kernel_blacklist_enabled: true
+security_hardening_umask_enabled: true
+security_hardening_auditd_enabled: true
+security_hardening_journald_limit: "500M"
+security_hardening_unused_services_disabled: true
+security_hardening_password_policy_enabled: true
+security_hardening_pwquality_enabled: true
+security_hardening_apparmor_enabled: true

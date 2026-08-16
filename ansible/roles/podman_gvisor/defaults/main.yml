@@ -1,0 +1,6 @@
+---
+# defaults file for podman_gvisor
+podman_gvisor_harness_name: "{{ harness_name | default('hermes') }}"
+podman_gvisor_enabled: "{{ gvisor_enabled | default(true) }}"
+podman_gvisor_default: "{{ gvisor_default | default(true) }}"
+podman_gvisor_binary_url: "https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/runsc"

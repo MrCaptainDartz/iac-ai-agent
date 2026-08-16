@@ -23,51 +23,15 @@
     default: deny
   notify: Reload UFW
 
-- name: Allow SSH on port 22
+- name: Rate limit SSH on port 22
   community.general.ufw:
-    rule: allow
+    rule: limit
     port: '22'
     proto: tcp
-    comment: 'SSH'
+    comment: 'SSH Rate Limited'
   notify: Reload UFW
 
-- name: Create UFW after.rules for Docker isolation
-  ansible.builtin.blockinfile:
-    path: /etc/ufw/after.rules
-    marker: "# {mark} ANSIBLE MANAGED BLOCK - Docker isolation"
-    insertbefore: "^COMMIT$"
-    block: |
-      # Docker port isolation - block all forwarded traffic by default
-      :DOCKER-USER - [0:0]
-
-      # Allow established connections
-      -A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-
-      # Allow localhost
-      -A DOCKER-USER -i lo -j ACCEPT
-
-      # Block all other forwarded traffic to Docker containers from external interface
-      -A DOCKER-USER -i {{ ansible_facts['default_ipv4']['interface'] }} -j DROP
-    create: false
-  notify:
-    - Reload UFW
-    - Restart docker
-
-- name: Create Docker daemon config directory
-  ansible.builtin.file:
-    path: /etc/docker
-    state: directory
-    mode: '0755'
-
-- name: Configure Docker daemon to work with UFW
-  ansible.builtin.template:
-    src: daemon.json.j2
-    dest: /etc/docker/daemon.json
-    owner: root
-    group: root
-    mode: '0644'
-  notify: Restart docker
-
-- name: Enable UFW
+- name: Enable UFW firewall with logging
   community.general.ufw:
     state: enabled
+    logging: "on"
