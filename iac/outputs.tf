@@ -5,9 +5,9 @@ output "vm_ids" {
 
 output "vm_ips" {
   description = "Map of VM names to their configured IP addresses (all interfaces)"
-  value       = { 
+  value = {
     for k, vm in var.vm_config : k => [
       for nic in vm.network_interfaces : nic.address
-    ] 
+    ]
   }
 }

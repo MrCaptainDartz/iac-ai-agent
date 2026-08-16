@@ -5,14 +5,23 @@
     state: present
     update_cache: true
 
-- name: Set UFW default policies
+- name: Set UFW default incoming policy to deny
   community.general.ufw:
-    direction: "{{ item.direction }}"
-    policy: "{{ item.policy }}"
-  loop:
-    - { direction: 'incoming', policy: 'deny' }
-    - { direction: 'outgoing', policy: 'allow' }
-    - { direction: 'routed', policy: 'deny' }
+    direction: incoming
+    default: deny
+  notify: Reload UFW
+
+- name: Set UFW default outgoing policy to allow
+  community.general.ufw:
+    direction: outgoing
+    default: allow
+  notify: Reload UFW
+
+- name: Set UFW default routed policy to deny
+  community.general.ufw:
+    direction: routed
+    default: deny
+  notify: Reload UFW
 
 - name: Allow SSH on port 22
   community.general.ufw:
@@ -20,23 +29,7 @@
     port: '22'
     proto: tcp
     comment: 'SSH'
-
-- name: Get default network interface
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      ip route | grep default | awk '{print $5}' | head -n1
-    executable: /bin/bash
-  register: firewall_default_interface
-  changed_when: false
-
-- name: Validate default network interface was detected
-  ansible.builtin.assert:
-    that:
-      - firewall_default_interface.stdout is defined
-      - firewall_default_interface.stdout | length > 0
-    fail_msg: "Failed to detect default network interface. Cannot configure firewall rules safely."
-    success_msg: "Default network interface detected: {{ firewall_default_interface.stdout }}"
+  notify: Reload UFW
 
 - name: Create UFW after.rules for Docker isolation
   ansible.builtin.blockinfile:
@@ -54,8 +47,11 @@
       -A DOCKER-USER -i lo -j ACCEPT
 
       # Block all other forwarded traffic to Docker containers from external interface
-      -A DOCKER-USER -i {{ firewall_default_interface.stdout }} -j DROP
+      -A DOCKER-USER -i {{ ansible_facts['default_ipv4']['interface'] }} -j DROP
     create: false
+  notify:
+    - Reload UFW
+    - Restart docker
 
 - name: Create Docker daemon config directory
   ansible.builtin.file:
@@ -70,16 +66,8 @@
     owner: root
     group: root
     mode: '0644'
-
-- name: Restart docker
-  ansible.builtin.systemd:
-    name: docker
-    state: restarted
+  notify: Restart docker
 
 - name: Enable UFW
   community.general.ufw:
     state: enabled
-
-- name: Reload UFW
-  community.general.ufw:
-    state: reloaded

@@ -1,2 +1,3 @@
 ---
 nvm_user: "{{ ansible_user | default(lookup('env', 'USER')) }}"
+nvm_node_version: "lts/*"

@@ -39,5 +39,6 @@ terraform.rc
 #Ignore lock files
 .terraform.lock.hcl
 
-#Ansible
+# Ansible
 ansible/inventory/inventory.yml
+ansible/group_vars/all.yml

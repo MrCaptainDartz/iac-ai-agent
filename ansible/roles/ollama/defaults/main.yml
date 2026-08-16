@@ -1,0 +1,5 @@
+---
+# defaults file for ollama
+ollama_enabled: true
+ollama_signin_required: false
+ollama_models: []

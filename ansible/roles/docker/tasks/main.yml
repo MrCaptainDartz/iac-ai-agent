@@ -15,30 +15,21 @@
     state: directory
     mode: '0755'
 
-- name: Add Docker GPG key
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      curl -fsSL https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg | \
-        gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-      chmod a+r /etc/apt/keyrings/docker.gpg
-    creates: /etc/apt/keyrings/docker.gpg
-    executable: /bin/bash
+- name: Download Docker GPG key
+  ansible.builtin.get_url:
+    url: "https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}/gpg"
+    dest: /etc/apt/keyrings/docker.asc
+    mode: '0644'
 
 - name: Add Docker repository
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      echo "deb [arch=$(dpkg --print-architecture) \
-        signed-by=/etc/apt/keyrings/docker.gpg] \
-        https://download.docker.com/linux/{{ ansible_distribution | lower }} \
-        $(lsb_release -cs) stable" | \
-        tee /etc/apt/sources.list.d/docker.list > /dev/null
-    creates: /etc/apt/sources.list.d/docker.list
-    executable: /bin/bash
-
-- name: Update apt cache after adding Docker repo
-  ansible.builtin.apt:
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ 'amd64' if ansible_facts['architecture'] == 'x86_64' else ansible_facts['architecture'] }}
+      signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}
+      {{ ansible_facts['distribution_release'] }} stable
+    state: present
+    filename: docker
     update_cache: true
 
 - name: Install Docker CE
@@ -52,7 +43,7 @@
     state: present
 
 - name: Ensure Docker service is started and enabled
-  ansible.builtin.systemd:
+  ansible.builtin.systemd_service:
     name: docker
     state: started
     enabled: true

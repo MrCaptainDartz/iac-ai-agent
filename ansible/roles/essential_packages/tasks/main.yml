@@ -1,5 +1,9 @@
 ---
-# Linux-specific system tools installation (apt-based)
+- name: Update apt cache and upgrade all system packages
+  ansible.builtin.apt:
+    update_cache: true
+    upgrade: dist
+    cache_valid_time: 3600
 
 - name: Install essential system tools (Linux - apt)
   ansible.builtin.apt:
@@ -48,6 +52,13 @@
     state: present
     update_cache: true
 
+- name: Install additional custom system packages
+  ansible.builtin.apt:
+    name: "{{ essential_packages_extra }}"
+    state: present
+    update_cache: true
+  when: essential_packages_extra is defined and (essential_packages_extra | length > 0)
+
 - name: Deploy global vim configuration (Linux)
   ansible.builtin.template:
     src: vimrc.j2
@@ -61,6 +72,8 @@
     name: "{{ item.name }}"
     scope: global
     value: "{{ item.value }}"
+  become: true
+  become_user: "{{ ansible_user }}"
   loop:
     - { name: 'init.defaultBranch', value: 'main' }
     - { name: 'pull.rebase', value: 'false' }

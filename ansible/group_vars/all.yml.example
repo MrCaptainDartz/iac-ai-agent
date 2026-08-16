@@ -1,0 +1,24 @@
+---
+# Global variables for the project
+# Copy this file to 'all.yml' and customize it according to your needs.
+
+# Node.js / NVM configuration
+nvm_version: "v0.40.6"
+nvm_node_version: "lts/*" # e.g. "lts/*", "22", "20"
+
+# System configuration
+system_timezone_value: "Europe/Paris"
+
+# Additional custom system packages to install (e.g. ["nvtop", "btop", "zsh"])
+essential_packages_extra: []
+
+# Ollama configuration
+# Set to false if you already have an external inference server and only want the agent environment
+ollama_enabled: true
+
+# Set to true if you pull Ollama Cloud models and need interactive OAuth authentication
+ollama_signin_required: false
+
+ollama_models:
+  - kimi-k2.7-code:cloud
+  - qwen3-embedding:0.6b

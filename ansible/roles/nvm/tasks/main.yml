@@ -47,17 +47,19 @@
   become_user: "{{ nvm_user }}"
   when: not nvm_stat.stat.exists
 
-- name: Install Node.js LTS via NVM
+- name: Install Node.js via NVM
   ansible.builtin.shell: |
     export NVM_DIR="{{ nvm_dir }}"
     [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-    nvm install --lts && nvm use --lts && nvm alias default 'lts/*'
+    nvm install {{ nvm_node_version }} && nvm use {{ nvm_node_version }} && nvm alias default {{ nvm_node_version }}
   args:
     executable: /bin/bash
   become: true
   become_user: "{{ nvm_user }}"
   register: nvm_node_install
-  changed_when: "'is already installed' not in nvm_node_install.stdout and 'is already installed' not in nvm_node_install.stderr"
+  changed_when: >-
+    'is already installed' not in nvm_node_install.stdout and
+    'is already installed' not in nvm_node_install.stderr
 
 - name: Update global npm packages
   ansible.builtin.shell: |

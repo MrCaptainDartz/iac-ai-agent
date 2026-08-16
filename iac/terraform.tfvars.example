@@ -19,13 +19,16 @@ proxmox_insecure = true
 ssh_public_key = "ssh-rsa AAAAB3NzaC1yc... myuser@myworkstation"
 
 # ----------------------------------------------------------------
-# VM Configuration (optional — default values below)
-# gateway and vlan_id are optional
-# Each entry: node_name, and network_interfaces
+# VM Configuration
+# All VM settings (node, resources, network, GPU passthrough)
+# are configured directly inside each VM object.
+# Only node_name and network_interfaces are mandatory.
 # ----------------------------------------------------------------
 # vm_config = {
 #   "vm-ai" = {
 #     node_name = "pve-node1"
+#
+#     # Network configuration (mandatory)
 #     network_interfaces = [
 #       {
 #         bridge  = "vmbr0"
@@ -34,39 +37,54 @@ ssh_public_key = "ssh-rsa AAAAB3NzaC1yc... myuser@myworkstation"
 #         vlan_id = 100
 #       }
 #     ]
+#
+#     # Optional VM settings (defaults shown below)
+#     # vm_id             = null                  # Proxmox auto-assigns next free ID
+#     # description       = "Managed by OpenTofu - AI Agent Host"
+#     # cpu_cores         = 8
+#     # cpu_type          = "x86-64-v2-AES"       # or "host"
+#     # memory_mb         = 8192                  # 8 GiB
+#     # disk_size_gb      = 120
+#     # disk_datastore_id = "local-lvm"
+#     # disk_ssd          = true                  # Enable SSD emulation
+#     # disk_iothread     = false                 # Enable dedicated IOThread for performance
+#     # disk_discard      = "on"                  # TRIM support
+#     # machine_type      = "q35"                 # "q35" (PCIe/UEFI) or "pc"
+#     # bios              = "ovmf"                # "ovmf" (UEFI) or "seabios"
+#     # vga_type          = "qxl"                 # "qxl" (SPICE), "std", "serial0", "none"
+#     # keyboard_layout   = "fr"                  # "fr", "en-us", etc.
+#     # start_on_boot     = true
+#     # tags              = ["ai-agent", "opentofu"]
+#
+#     # Optional PCI devices (GPU / accelerator passthrough)
+#     # pci_devices = [
+#     #   {
+#     #     # Option A: Proxmox cluster resource mapping (recommended)
+#     #     mapping = "gpu"
+#     #
+#     #     # Option B: Direct PCI ID (omit the .X suffix to passthrough all functions, e.g. "0000:01:00")
+#     #     # id    = "0000:01:00"
+#     #
+#     #     pcie    = true
+#     #     rombar  = true
+#     #     xvga    = false                       # Set true if primary display
+#     #   }
+#     # ]
 #   }
 # }
 
 # ----------------------------------------------------------------
-# Optional parameters (reasonable default values)
+# Optional Global Infrastructure Settings
 # ----------------------------------------------------------------
 
-# Cloud-Init Image
-# ubuntu_cloud_image_url      = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
-# ubuntu_cloud_image_filename = "ubuntu-24.04-noble-server-cloudimg-amd64.img"
+# Cloud-Init Image & Snippets
+# ubuntu_cloud_image_url      = "https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img"
+# ubuntu_cloud_image_filename = "ubuntu-26.04-server-cloudimg-amd64.img"
 # image_datastore_id          = "local"
+# enable_cloudinit_snippet    = true              # Automatically installs and starts qemu-guest-agent via snippet
+# snippet_datastore_id        = "local"           # Datastore where snippets are stored (must support 'snippets')
 
-# VM Resources
-# vm_machine_type      = "q35"     # "q35" (recommended for PCIe/UEFI) or "pc" (Legacy)
-# vm_bios              = "seabios" # "seabios" or "ovmf" (UEFI)
-# vm_vga_type          = "qxl"     # "qxl" (SPICE), "std" (Default), "serial0", "vmware"
-# vm_keyboard_layout   = "fr"      # "fr", "en-us", etc.
-# vm_cpu_cores         = 16
-# vm_cpu_type          = "x86-64-v2-AES"
-# vm_memory_mb         = 24576   # 24 GiB
-# vm_disk_size_gb      = 120
-# vm_disk_datastore_id = "local-lvm"
-
-# Automatic Startup
-# vm_start_on_boot = true
-
-# Proxmox Tags
-# vm_tags = ["openclaw", "opentofu"]
-
-
-# Cloud-Init user
-# vm_user = "openclaw"
-
-# DNS configuration (optional)
-# dns_servers = ["1.1.1.1", "1.0.0.1"]
-# dns_domain  = "home.lan"
+# Cloud-Init User & DNS
+# vm_user     = "ubuntu"
+# dns_servers = ["9.9.9.9", "1.1.1.1"]
+# dns_domain  = "."                               # '.' represents no search domain in Proxmox
