@@ -11,7 +11,7 @@ Infrastructure as Code (IaC) solution to automatically provision and configure h
    - **Harness-Agnostic Setup**: Configurable agent harness name (`harness_name: "hermes"` or `"openclaw"`).
    - **Least-Privilege Security**: Dedicated non-root user with `0750` home directory permissions and scoped sudo permissions (`restart` only) to prevent privilege escalation, denial of service, and credential dumping.
    - **Continuous Operation**: `systemd` lingering enabled (`loginctl enable-linger`) with D-Bus/XDG user session for 24/7 background agent daemons.
-   - **Kernel-Isolated Sandboxing ("Secure by Default")**: Rootless **Podman** container engine configured with Google **gVisor (`runsc`) as the default runtime**. Every container (`podman run` or `docker run`) automatically runs in a memory-safe user-space kernel sandbox.
+   - **Kernel-Isolated Sandboxing ("Secure by Default")**: Rootless **Podman** container engine configured with Google **gVisor (`runsc`) as the default runtime**. Every container (`podman run`, `docker run`, `docker compose up`) automatically runs in a memory-safe user-space kernel sandbox.
    - **Full Docker & Compose Compatibility**: Drop-in `docker`, `docker-compose`, and `docker compose` compatibility via `podman-docker` and `podman-compose` with `DOCKER_HOST` socket integration.
    - **Multi-Layer Defense in Depth**:
      - **SSH Hardening**: Password authentication disabled, root login disabled, `AllowUsers` whitelist, rate-limiting, brute-force protection with **Fail2ban**, and Post-Quantum cryptography (`sntrup761x25519`).
@@ -19,7 +19,7 @@ Infrastructure as Code (IaC) solution to automatically provision and configure h
      - **OS & Kernel Hardening**: `sysctl` kernel protections, memory sandbox (`yama.ptrace_scope = 1`), AppArmor enforce mode, `libpam-pwquality`, obsolete kernel modules blacklisting (`dccp`, `sctp`, `firewire`), and secure default `umask 027`.
      - **Automated Security Updates**: `unattended-upgrades` with `apt-daily.timer` and automatic kernel cleanups.
      - **Ollama Security**: Explicit localhost binding (`127.0.0.1:11434`) via systemd override to prevent external network exposure.
-   - **Modern Python & Developer Stack**: **`uv`** standalone manager with **Python 3.14**, Node.js (via NVM), essential search & monitoring tools (`ripgrep`, `fd-find`, `btop`, `nvtop`), UFW firewall, and Ollama with automated model downloading.
+   - **Modern Python & Developer Stack**: **`uv`** standalone manager with **Python 3.14**, Node.js (via NVM), global Git & Vim configurations, essential search & monitoring tools (`ripgrep`, `fd-find`, `btop`, `nvtop`), UFW firewall, and Ollama with automated model downloading.
 
 ---
 
@@ -63,6 +63,8 @@ cp ansible/group_vars/all.yml.example ansible/group_vars/all.yml
 
 Customize global settings as needed:
 - `harness_name`: Name of the agent / dedicated non-root user (e.g. `"hermes"`, `"openclaw"`, default: `"hermes"`).
+- `harness_ssh_keys`: Optional additional SSH public keys for the harness user (default: `[]`).
+- `ssh_allow_tcp_forwarding`: Set to `true` if SSH port forwarding/tunneling is needed (default: `false`).
 - `gvisor_enabled`: Enable Google gVisor (`runsc`) runtime in Podman (default: `true`).
 - `gvisor_default`: Use gVisor (`runsc`) as the default OCI runtime for all containers (default: `true`).
 - `uv_python_version`: Python version managed by `uv` for the harness user (default: `"3.14"`).
@@ -98,12 +100,12 @@ The playbook will:
 - Wait for Cloud-Init initial boot to complete.
 - Update and upgrade all system packages.
 - Install hypervisor integration (`qemu-guest-agent`).
-- Apply full system security hardening (SSH keys only, Fail2ban, unattended-upgrades, sysctl, core dumps disable, umask 027, anti-DoS limits).
-- Install essential developer tools (`ripgrep`, `fd`, `btop`, `nvtop`, etc.).
+- Apply full system security hardening (SSH keys only, Post-quantum crypto, Fail2ban, unattended-upgrades, sysctl, core dumps disable, umask 027, anti-DoS limits, AppArmor, pwquality).
+- Install essential developer tools (`ripgrep`, `fd`, `btop`, `nvtop`, etc.) and deploy global Git/Vim configurations.
 - Create the dedicated agent user (`0750`) with scoped sudo permissions and systemd lingering.
 - Install Podman Rootless with Docker/Compose compatibility layer and Google gVisor (`runsc`) as default runtime.
 - Configure UFW firewall, Node.js via NVM, and **`uv` with Python 3.14**.
-- Install Ollama (bound strictly to `127.0.0.1`) and pull configured models (if enabled).
+- Install Ollama (bound strictly to `127.0.0.1:11434`) and pull configured models (if enabled).
 - Reboot the machine automatically only if pending kernel updates require it.
 
 ### Step 3: Connect & Launch Agent
@@ -144,6 +146,12 @@ ssh <harness_name>@<VM_IP_ADDRESS>
 - **Rootless User Namespaces**: The agent process cannot escape container boundaries to gain root privileges on the host VM.
 - **gVisor by Default**: Any container invocation (`podman run`, `docker run`, `docker compose up`) automatically runs within a user-space kernel sandbox to neutralize host kernel 0-day exploits.
 - **Kernel & Memory Hardening**: Core dumps disabled, kernel pointers masked (`kptr_restrict`), dmesg restricted to root, obsolete network modules blacklisted.
+
+---
+
+## 📋 Roadmap (NemoClaw-Grade Security)
+
+For upcoming phases and security roadmap (L7 Egress Proxy, Zero-Secret credential injection, and Systemd Agent Sandboxing), see [TODO.md](TODO.md).
 
 ---
 
