@@ -32,9 +32,13 @@ essential_packages_extra: []
 # Set to false if you already have an external inference server and only want the agent environment
 ollama_enabled: true
 
-# Set to true if you pull Ollama Cloud models and need interactive OAuth authentication
+# Set to true if you pull models that need interactive OAuth authentication
 ollama_signin_required: false
 
+# Models to pull automatically.
+# Default: a small local model + an embedding model — nothing leaves the VM.
+# Remote models are a deployment choice, declare them here:
+#   - <remote-model>:cloud   # requires ollama_signin_required: true
 ollama_models:
-  - kimi-k2.7-code:cloud
+  - qwen3:4b
   - qwen3-embedding:0.6b

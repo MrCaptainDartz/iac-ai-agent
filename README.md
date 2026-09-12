@@ -1,6 +1,6 @@
 # IAC AI Agent Deployer
 
-Infrastructure as Code (IaC) solution to automatically provision and configure hardened Virtual Machines on a **Proxmox VE** cluster, tailored for hosting autonomous AI Agents (such as **Hermes**, **OpenClaw**, **Smolagents**, etc.) with rootless sandboxing via **Podman + Google gVisor (`runsc`)**, Docker/Compose compatibility layer, modern Python tooling via **`uv` (Python 3.14)**, QEMU Guest Agent integration, and local/cloud LLM inference with **Ollama**.
+Infrastructure as Code (IaC) solution to automatically provision and configure hardened Virtual Machines on a **Proxmox VE** cluster, tailored for hosting autonomous AI Agents (such as **Hermes**, **OpenClaw**, **Smolagents**, etc.) with rootless sandboxing via **Podman + Google gVisor (`runsc`)**, Docker/Compose compatibility layer, modern Python tooling via **`uv` (Python 3.14)**, QEMU Guest Agent integration, and LLM inference with **Ollama**, running either locally or against a remote provider.
 
 ---
 
@@ -18,7 +18,7 @@ Infrastructure as Code (IaC) solution to automatically provision and configure h
      - **Resource Limits & Anti-DoS**: `limits.d` protection against fork bombs (`nproc 2048`), file descriptor exhaustion (`nofile 65536`), and core dump suppression.
      - **OS & Kernel Hardening**: `sysctl` kernel protections, memory sandbox (`yama.ptrace_scope = 1`), AppArmor enforce mode, `libpam-pwquality`, obsolete kernel modules blacklisting (`dccp`, `sctp`, `firewire`), and secure default `umask 027`.
      - **Automated Security Updates**: `unattended-upgrades` with `apt-daily.timer` and automatic kernel cleanups.
-     - **Ollama Security**: Explicit localhost binding (`127.0.0.1:11434`) via systemd override to prevent external network exposure.
+     - **Ollama Security**: Explicit localhost binding (`127.0.0.1:11434`) via systemd override — this closes the **inbound** path, so the endpoint is not reachable from the network. It does not constrain **outbound** traffic: a model backed by a remote provider still generates egress, which is governed separately by the agent egress control ([TODO.md](TODO.md) Phase 1).
    - **Modern Python & Developer Stack**: **`uv`** standalone manager with **Python 3.14**, Node.js (via NVM), global Git & Vim configurations, essential search & monitoring tools (`ripgrep`, `fd-find`, `btop`, `nvtop`), UFW firewall, and Ollama with automated model downloading.
 
 ---
@@ -70,8 +70,8 @@ Customize global settings as needed:
 - `uv_python_version`: Python version managed by `uv` for the harness user (default: `"3.14"`).
 - `nvm_node_version`: Node.js version to install (default: `"lts/*"`).
 - `ollama_enabled`: Set to `false` if using an external inference server (default: `true`).
-- `ollama_models`: List of models to pull automatically (e.g. `["kimi-k2.7-code:cloud", "qwen3-embedding:0.6b"]`).
-- `ollama_signin_required`: Set to `true` if pulling Ollama Cloud models requiring interactive OAuth browser login (default: `false`).
+- `ollama_models`: List of models to pull automatically (e.g. `["qwen3:4b", "qwen3-embedding:0.6b"]`). The shipped default is a small local model; remote models are a deployment choice — declare them here and set `ollama_signin_required: true` if the provider needs an interactive login.
+- `ollama_signin_required`: Set to `true` if pulling models that require an interactive OAuth browser login (default: `false`).
 - `essential_packages_extra`: Additional custom system packages to install (e.g. `["zsh", "fish"]`).
 - `system_timezone_value`: Timezone (default: `"Europe/Paris"`).
 
@@ -124,34 +124,38 @@ ssh <harness_name>@<VM_IP_ADDRESS>
 ```
 ┌────────────────────────────────────────────────────────┐
 │  Proxmox VE Hypervisor (QEMU Guest Agent + KVM)       │
-│  ┌──────────────────────────────────────────────────┐  │
-│  │  Dedicated VM (UFW + Fail2ban + Auto-Upgrades)    │  │
-│  │  ┌────────────────────────────────────────────┐  │  │
-│  │  │  Non-Root Harness User (e.g. hermes 0750)  │  │  │
-│  │  │  • Scoped Sudoers: restart only            │  │  │
-│  │  │  • Anti-DoS Limits: nproc 2048 / nofile    │  │  │
-│  │  │  • Podman Rootless (User Namespaces)       │  │  │
-│  │  │  • Docker & Compose CLI Compatibility      │  │  │
-│  │  │  • Python 3.14 via uv + Node.js via NVM   │  │  │
-│  │  │  ┌──────────────────────────────────────┐  │  │  │
-│  │  │  │  gVisor Sandbox (runsc User-Kernel)  │  │  │  │
-│  │  │  │  Default Runtime for all Containers  │  │  │  │
-│  │  │  └──────────────────────────────────────┘  │  │  │
-│  │  └────────────────────────────────────────────┘  │  │
-│  └──────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────┘
+│  ┌────────────────────────────────────────────────────────┐
+  │  Proxmox VE Hypervisor (QEMU Guest Agent + KVM)        │
+  │  ┌──────────────────────────────────────────────────┐  │
+  │  │  Dedicated VM (UFW + Fail2ban + Auto-Upgrades)   │  │
+  │  │  ┌────────────────────────────────────────────┐  │  │
+  │  │  │  Non-Root Harness User (e.g. hermes 0750)  │  │  │
+  │  │  │  • Scoped Sudoers: restart only            │  │  │
+  │  │  │  • Anti-DoS Limits: nproc 2048 / nofile    │  │  │
+  │  │  │  • Harness runs bare, outside gVisor       │  │  │
+  │  │  │  • Podman Rootless + Docker/Compose layer  │  │  │
+  │  │  │  • Python 3.14 via uv + Node.js via NVM    │  │  │
+  │  │  │  ┌──────────────────────────────────────┐  │  │  │
+  │  │  │  │  gVisor Sandbox (runsc user-kernel)  │  │  │  │
+  │  │  │  │  Containers the agent launches only  │  │  │  │
+  │  │  │  └──────────────────────────────────────┘  │  │  │
+  │  │  └────────────────────────────────────────────┘  │  │
+  │  └──────────────────────────────────────────────────┘  │
+  └────────────────────────────────────────────────────────┘
 ```
 
-- **Scoped Sudoers**: The agent user can only restart its own service (`sudo systemctl restart <harness_name>`). Stopping the service or reading system logs (`journalctl`) is strictly prohibited.
-- **Rootless User Namespaces**: The agent process cannot escape container boundaries to gain root privileges on the host VM.
-- **gVisor by Default**: Any container invocation (`podman run`, `docker run`, `docker compose up`) automatically runs within a user-space kernel sandbox to neutralize host kernel 0-day exploits.
+- **Scoped Sudoers**: The agent user can only restart its own service (`sudo systemctl restart <harness_name>`). Stopping the service or reading system logs (`journalctl`) is strictly prohibited. The service unit itself is created when the harness is installed — until then this rule targets a unit that does not exist yet.
+- **Rootless User Namespaces**: Containers launched by the agent cannot reach the host. The agent process itself is **not** containerized: it runs bare on the VM.
+- **gVisor by Default**: Any container invocation (`podman run`, `docker run`, `docker compose up`) automatically runs within a user-space kernel sandbox to neutralize host kernel 0-day exploits. This confines **the containers the agent launches** — not the agent.
 - **Kernel & Memory Hardening**: Core dumps disabled, kernel pointers masked (`kptr_restrict`), dmesg restricted to root, obsolete network modules blacklisted.
+
+> **Known gap — agent egress is not yet constrained.** Nothing today limits what the agent user can reach on the network. A manipulated or misaligned model has a shell and an outbound path; the hardening above protects the VM, not against that. Closing this is Phase 1 of [TODO.md](TODO.md).
 
 ---
 
-## 📋 Roadmap (NemoClaw-Grade Security)
+## 📋 Roadmap
 
-For upcoming phases and security roadmap (L7 Egress Proxy, Zero-Secret credential injection, and Systemd Agent Sandboxing), see [TODO.md](TODO.md).
+This project is a generic, composable sandbox rather than a solution to one use case. The socle (**per-uid egress control** + **inference gateway**) is always deployed, the **L7 egress proxy** is the adaptation brick, the **brokers** (Kubernetes, git) are optional extensions, and the **harness is installed last**, once the sandbox is ready. The component model and the phase order are in [TODO.md](TODO.md) §2.
 
 ---
 

@@ -106,15 +106,7 @@ variable "vm_config" {
       model       = optional(string, "virtio")
     }))
   }))
-  description = "Map of VM configurations: key = VM name, value = VM settings (node, resources, disk options, network interfaces, PCI devices)."
-  default = {
-    "vm-ai" = {
-      node_name = "pve-node1"
-      network_interfaces = [
-        { bridge = "vmbr0", address = "10.0.0.1/24", gateway = "10.0.0.254", vlan_id = 100 }
-      ]
-    }
-  }
+  description = "Map of VM configurations: key = VM name, value = VM settings (node, resources, disk options, network interfaces, PCI devices). No default: the target topology is deployment-specific and belongs in terraform.tfvars."
 }
 
 # ============================================================
