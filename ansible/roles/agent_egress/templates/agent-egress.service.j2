@@ -1,0 +1,21 @@
+# Agent zone egress filtering (Ansible Managed)
+[Unit]
+Description=Agent zone egress filtering (nftables)
+Documentation=man:nft(8)
+After=network-pre.target
+# Applied before the network comes up: no unfiltered window at boot.
+Before=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ agent_egress_nft_binary }} -f {{ agent_egress_ruleset_path }}
+ExecReload={{ agent_egress_nft_binary }} -f {{ agent_egress_ruleset_path }}
+# Fails the unit if the table did not land, so nothing fails silently.
+ExecStartPost={{ agent_egress_nft_binary }} list table inet agent_egress
+# Not hardened further: an over-restrictive sandbox would break the control silently.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

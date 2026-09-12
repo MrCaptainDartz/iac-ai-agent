@@ -1,0 +1,25 @@
+# Agent zone egress filtering (Ansible Managed)
+# Loaded by agent-egress.service, never nftables.service (stock config flushes UFW).
+
+# `destroy` first: re-applying is atomic and idempotent, with no unfiltered window.
+destroy table inet agent_egress
+
+table inet agent_egress {
+  chain output {
+    # priority -50: before UFW's OUTPUT (priority 0); a base-chain drop is terminal.
+    type filter hook output priority -50; policy accept;
+
+    # No name resolution: the loopback stub forwards upstream under its own uid.
+    meta skuid { {{ agent_egress_uids }} } ip daddr 127.0.0.0/8 udp dport 53 counter drop
+    meta skuid { {{ agent_egress_uids }} } ip daddr 127.0.0.0/8 tcp dport 53 counter drop
+    meta skuid { {{ agent_egress_uids }} } ip6 daddr ::1 udp dport 53 counter drop
+    meta skuid { {{ agent_egress_uids }} } ip6 daddr ::1 tcp dport 53 counter drop
+
+    # Loopback only. Subuid ranges cover --network=host containers; others exit as the harness uid.
+    meta skuid { {{ agent_egress_uids }} } ip daddr != 127.0.0.0/8 \
+      limit rate {{ agent_egress_log_rate }} burst {{ agent_egress_log_burst }} packets \
+      log prefix "{{ agent_egress_log_prefix }}"
+    meta skuid { {{ agent_egress_uids }} } ip daddr != 127.0.0.0/8 counter drop
+    meta skuid { {{ agent_egress_uids }} } ip6 daddr != ::1 counter drop
+  }
+}

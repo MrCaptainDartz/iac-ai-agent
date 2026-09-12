@@ -55,7 +55,7 @@ C'est cette règle qui rend le broker optionnel : s'il n'y a aucun secret à dé
 
 ## 🏗️ 1. État déployé
 
-Le socle d'isolation multi-couches est en place. **« Déployé » ne veut pas dire « vérifié »** : aucun contrôle automatisé n'atteste l'état réel aujourd'hui — c'est l'objet de la Phase 7.
+Le socle d'isolation multi-couches est en place. **« Déployé » ne veut pas dire « vérifié »** : aucun contrôle automatisé n'atteste l'état réel aujourd'hui — c'est l'objet de la Phase 7. (Le contrôle d'egress de la Phase 1 a été vérifié à la main, mesures à l'appui, mais rien ne l'atteste automatiquement : c'est exactement ce que la Phase 7 doit combler.)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -67,7 +67,7 @@ Le socle d'isolation multi-couches est en place. **« Déployé » ne veut pas d
 │  │   • Harnais IA (processus nu, PAS dans gVisor) — installé en Phase 8   │  │
 │  │   • Sudoers restreint : restart uniquement · limits.d anti-DoS         │  │
 │  │   • Python via uv · Node.js via NVM · Docker/Compose compat            │  │
-│  │   • Aucun credential (cible) · egress via proxy L7 (cible)             │  │
+│  │   • Aucun credential (cible) · egress : loopback seul (fait, Ph. 1)    │  │
 │  │   ┌───────────────────────────────────────────────────────────────┐   │  │
 │  │   │  gVisor (runsc) — runtime OCI par défaut                       │   │  │
 │  │   │  Sandbox des conteneurs LANCÉS PAR l'agent, pas de l'agent     │   │  │
@@ -94,6 +94,7 @@ Le proxy L7 est la **brique d'adaptation** : elle permet de déclarer une politi
 4. **Hardening Kernel & OS** : ASLR complet, `yama.ptrace_scope=1`, anti-DoS réseau, anti-spoofing, core dumps désactivés, blacklist `dccp`/`sctp`/`rds`/`tipc`/`firewire`, umask `027`.
 5. **Surveillance** : fail2ban + action UFW, `unattended-upgrades` + `apt-daily.timer`, auditd, AppArmor enforce, `libpam-pwquality`.
 6. **Utilisateur harnais** : non-root, home `0750`, linger systemd. Le sudoers scopé (`systemctl restart`) référence une unité qui n'existe qu'à partir de la Phase 8.
+7. **Egress de la zone agent** : filtré par uid (table nftables `agent_egress`, chargée par `agent-egress.service`) — loopback seul, résolution de noms comprise, conteneurs couverts. Appliqué en dernier rôle du play ; voir Phase 1 pour l'ordre et la fenêtre assumée.
 
 ---
 
@@ -103,7 +104,7 @@ Chaque composant est un rôle activable, dans le style existant.
 
 | Composant | Rôle | Flag | Requis |
 |---|---|---|---|
-| Contrôle de l'egress par uid | `agent_egress` | `agent_egress_enabled` | **Socle** |
+| Contrôle de l'egress par uid | `agent_egress` | `agent_egress_filter_enabled` | **Socle** |
 | Gateway d'inférence | `inference_gateway` | `inference_gateway_enabled` | **Socle** |
 | Provider d'inférence local (Ollama) | `ollama` *(existant)* | `ollama_enabled` | Optionnel |
 | Proxy egress L7 (niveau 1 : allowlist) | `egress_proxy` | `agent_egress_proxy_enabled` | Brique d'adaptation |
@@ -130,7 +131,7 @@ harness_name: "hermes"              # hermes, openclaw, smolagents, ...
 # harness_exec_start: "/usr/local/bin/uv run python main.py"
 
 # --- Socle ---
-agent_egress_enabled: true          # filtrage de l'egress par uid
+agent_egress_filter_enabled: true   # filtre l'egress de la zone agent (loopback seul)
 
 # --- Inférence : le provider est un choix de l'utilisateur ---
 inference_gateway_enabled: true
@@ -174,48 +175,74 @@ harness_service_enabled: true
 
 **Pourquoi en premier :** ces affirmations fausses créent un faux sentiment de sécurité — précisément ce qui fait qu'on ne met pas en place le contrôle qui manque.
 
-#### 🌟 Phase 1 — Contrôle de l'egress par uid
+#### ✅ Phase 1 — Contrôle de l'egress par uid *(faite)*
 
-L'allowlist devient **structurelle** (topologie) au lieu d'être content-based : si la zone agent n'a pas de route, il n'y a rien à filtrer au L7. C'est le socle sur lequel la Phase 3 vient se poser.
+L'allowlist devient **structurelle** (topologie) au lieu d'être content-based : si la zone agent n'a pas de route, il n'y a rien à filtrer au L7. C'est le socle de la Phase 3.
 
-**Cette phase ne dépend que de l'uid du harnais**, qui existe déjà (`harness_user` est déployé). Elle est donc indépendante de l'installation du harnais et de son unité systemd (Phase 8), et c'est le seul contrôle vraiment bloquant pour le reste.
+**Ne dépend que de l'uid du harnais** (`harness_user` est déployé), pas de l'installation du harnais ni de son unité (Phase 8).
 
-**Deux implémentations possibles — à trancher.** Les deux fonctionnent ; le choix porte sur la modularité.
+**Option A retenue** — table nftables dédiée, testable seule, indépendante d'UFW. UFW garde l'ingress et son propre OUTPUT ; les deux coexistent.
 
-**Option A (recommandée) : table nftables dédiée et optionnelle.** Auto-contenue, testable seule (`nft list ruleset`), ne dépend pas d'UFW — donc utilisable par quelqu'un qui n'utilise pas UFW. Ordre garanti par la priorité de hook.
+**Règles déployées.** Le snippet initial était incomplet sur trois points — IPv6, plages subuid, DNS — tous corrigés :
 
 ```nft
 table inet agent_egress {
-  # Priorité NÉGATIVE : évalué avant la chaîne filter d'UFW (priorité 0),
-  # sinon un `accept` d'UFW pourrait court-circuiter ces drop.
   chain output {
     type filter hook output priority -50; policy accept;
 
-    # Zone agent : loopback uniquement. Couvre aussi les conteneurs gVisor,
-    # car pasta/slirp4netns sort sous l'uid du harnais.
-    meta skuid <uid_agent> ip daddr != 127.0.0.0/8 counter drop
+    # Aucune résolution de noms : le stub loopback relaie en amont sous son propre uid.
+    meta skuid { <uids> } ip daddr 127.0.0.0/8 udp dport 53 counter drop
+    meta skuid { <uids> } ip daddr 127.0.0.0/8 tcp dport 53 counter drop
+    meta skuid { <uids> } ip6 daddr ::1 udp dport 53 counter drop
+    meta skuid { <uids> } ip6 daddr ::1 tcp dport 53 counter drop
 
-    # Composants de la zone de confiance (si déployés) : uniquement leurs upstreams
-    meta skuid <uid_broker> ip daddr { <upstreams...> } tcp dport 443 counter accept
-    meta skuid <uid_broker> counter drop
+    # Loopback uniquement. Le `drop` a lieu dans le hook output local : l'émetteur
+    # échoue immédiatement et rien ne fuit en réponse.
+    # Le log throttlé est une règle SÉPARÉE : `limit` est un match, donc dans la
+    # règle de drop il ferait sauter le drop au-delà du seuil (filtre ouvert).
+    meta skuid { <uids> } ip daddr != 127.0.0.0/8 \
+      limit rate 6/minute burst 12 packets log prefix "agent-egress-drop: "
+    meta skuid { <uids> } ip daddr != 127.0.0.0/8 counter drop
+    meta skuid { <uids> } ip6 daddr != ::1 counter drop
   }
 }
 ```
 
-**Option B (minimale) : `/etc/ufw/before.rules`.** Suffit techniquement — les chaînes `ufw-before-*` sont traversées avant la politique de sortie par défaut, et `iptables-restore` accepte le match `owner` en OUTPUT :
+`<uids>` = uid du harnais **+ ses plages subuid**, résolus à l'exécution (`id -u`, `/etc/subuid`) : l'uid n'est pas fixé par `harness_user`.
 
-```
--A ufw-before-output -m owner --uid-owner <uid_agent> ! -d 127.0.0.0/8 -j DROP
-```
+**Ce que les mesures ont établi** — plusieurs hypothèses sont tombées :
 
-Évite un second outil, mais couple la politique à UFW et reste un fichier `iptables-restore` peu lisible.
+| Point | Résultat mesuré |
+|---|---|
+| Ordre des hooks | UFW est en `priority filter` (= 0) : le `drop` à `-50` passe avant et est **terminal**. UFW ne peut pas le court-circuiter. Vérifié. |
+| Conteneurs (réseau propre) | Atteignent l'extérieur filtre levé, **timeout filtre actif** (A/B) : `meta skuid` couvre pasta/netavark. |
+| Contournement `--network=host` | **Réel** : uid hôte mesuré **100999** (plage subuid), pas celui du harnais. Chemin mort avec `runsc` (défaut), mais **vivant avec `gvisor_default: false`** — et c'est l'inclusion subuid qui le bloque. |
+| Latence | Résolution bloquée mesurée à **~0 s** : le `drop` en hook output fait échouer `sendto` immédiatement. Le « ~5 s » supposé était faux. |
+| Limiteur de log | `limit` est un **match** : placé dans la règle de drop, il fait sauter le `drop` au-delà du seuil — le filtre échouait **ouvert**. Mesuré sous charge : **37 paquets sur 50 acceptés**. Le log throttlé est donc une règle à part, et le `drop` inconditionnel. |
+| Volume de test | Le défaut ci-dessus est passé inaperçu parce que tous les tests étaient à faible volume, sous le seuil du limiteur. **Tout limiteur de débit doit être testé au-dessus de son seuil.** |
+| IPv6 | `ip daddr` ne matche que l'IPv4 : sans `ip6 daddr != ::1`, l'agent sort par IPv6. |
 
-- [ ] **Ne pas migrer UFW vers nftables intégralement.** UFW gère bien l'ingress, est déjà déployé, et fail2ban utilise son action `ufw`. Le remplacer imposerait de réimplémenter l'ingress et de casser l'intégration fail2ban. **UFW reste pour l'ingress, l'egress par uid s'ajoute à côté.**
-- [ ] Utiliser les **uid numériques** dans la conf finale (le nom doit exister au chargement).
-- [ ] `agent_egress_enabled: false` ne doit rien modifier d'autre.
-- [ ] **Vérifier l'interaction UFW ↔ nftables empiriquement** : `sudo -u {{ harness_name }} curl -m3 https://example.com` doit timeouter, puis `nft list ruleset`.
-- [ ] Prévoir les exceptions d'egress du **gateway d'inférence** (Phase 2) et du **proxy L7** (Phase 3) : leurs uid respectifs reçoivent l'accès sortant que la zone agent n'a pas.
-- [ ] Noter que la couche systemd complémentaire (`IPAddressDeny`) arrive avec l'unité du harnais (Phase 8) — elle n'est pas nécessaire ici, le filtrage par uid suffit.
+**Ordre dans le play : `agent_egress` est le DERNIER rôle** ; les `pre_tasks` lèvent le filtre pour la durée du run.
+
+- [x] **Pas de migration UFW → nftables** : UFW reste pour l'ingress (fail2ban dépend de son action), l'egress par uid s'ajoute à côté.
+- [x] Uid **numériques** dans la conf finale.
+- [x] `agent_egress_filter_enabled: false` retire table, unité et fichier (vérifié : egress de l'agent rouvert).
+- [x] Interaction UFW ↔ nftables vérifiée empiriquement, **reboot compris**.
+- [x] Persistance par `agent-egress.service` dédiée (`oneshot`, `Before=network.target`), **jamais `nftables.service`** : le `/etc/nftables.conf` stock commence par `flush ruleset` et effacerait UFW au boot.
+- [x] `ExecStartPost` vérifie que la table est chargée : un échec ne peut pas laisser la zone ouverte en silence.
+
+**Le piège qui a failli passer.** Une unité `oneshot` + `RemainAfterExit` reste « active » indéfiniment : la table détruite par la levée n'était **pas** réappliquée, pendant que `systemctl is-active` répondait `active`. Le rôle lit désormais **la table vivante**. Un contrôle de sécurité doit vérifier l'**effet**, pas l'état déclaré.
+
+**Fenêtre assumée.** Un run qui échoue avant le dernier rôle laisse la zone agent ouverte jusqu'au run suivant — prix de ce choix, retenu parce que le provisioning installe `nvm`/`npm` **en tant que harnais** et a besoin du réseau. La Phase 7 **doit** donc asserter dans `make audit` que la table est chargée, sinon la fenêtre est indétectable.
+
+**Suites.** Phase 3 : le blocage DNS sera remplacé par un **résolveur en zone de confiance limité à l'allowlist du proxy** (proposition de l'utilisateur). Phase 8 : l'unité du harnais devra déclarer `After=agent-egress.service` — la couche `IPAddressDeny` reste utile en complément, elle ne remplace pas ce rôle.
+
+**Constaté au passage, non traité ici :**
+
+- **Plages subuid/subgid dupliquées** : `hermes` en a deux, dont une **partagée avec `ubuntu`** — l'inclusion subuid filtre donc aussi ses conteneurs. À dédupliquer un jour, mais changer une plage subuid sur une machine avec du stockage conteneur impose un `chown` du store : décision à part.
+- **`-e agent_egress_filter_enabled=false`** passe la *chaîne* `"false"`, qu'Ansible refuse comme conditionnel. Utiliser la forme JSON. Vaut pour tous les flags `*_enabled`.
+- **`nvm` exécute `npm update -g` sans condition** à chaque run : c'est ce qui rend la levée du filtre nécessaire, et une surface de supply chain à revoir (Phase 6).
+- **`sudo -u {{ harness_name }}` depuis `/home/ubuntu`** échoue (`0750` sur les deux homes) : préfixer par `cd /tmp` ou `-H`.
 
 #### 🌟 Phase 2 — Gateway d'inférence
 
@@ -257,7 +284,7 @@ Composant qui rend le **provider d'inférence interchangeable** : Ollama local, 
 - [ ] **Journaliser chaque requête** (destination, statut, taille) → principal artefact de détection d'exfiltration (Phase 7).
 - [ ] Quotas / rate-limits par destination, pour borner un agent en boucle.
 - [ ] `agent_egress_proxy_tls_intercept: false` par défaut, et la documentation doit dire ce que le niveau 2 coûte avant de l'activer.
-- [ ] Mettre à jour la Phase 1 : l'uid du proxy reçoit l'unique exception d'egress web.
+- [ ] **Egress du proxy : rien à ajouter à la Phase 1.** UFW est en `DEFAULT_OUTPUT_POLICY="ACCEPT"` : l'uid du proxy sort déjà. Le mécanisme d'exception ne sera nécessaire que si la politique sortante globale passe en deny — et il se posera alors dans la table `agent_egress`, à côté du `drop` de la zone agent.
 
 ### Extensions optionnelles
 
@@ -477,8 +504,16 @@ ssh {{ harness_name }}@<vm_ip> "docker run --rm alpine uname -a"
 # Provider d'inférence, en local
 ssh {{ harness_name }}@<vm_ip> "curl -s http://127.0.0.1:11434/api/tags"
 
-# Egress : direct doit timeouter, via le proxy doit passer (Phases 1 et 3)
-ssh {{ harness_name }}@<vm_ip> "curl -m 3 -sS https://example.com"
+# Egress (Phase 1) : la zone agent ne sort pas, le loopback reste ouvert
+ssh {{ harness_name }}@<vm_ip> "curl -m 3 -sS -o /dev/null -w '%{http_code}\n' https://example.com"
+# Attendu : échec (résolution comprise). Puis, depuis la zone agent :
+ssh {{ harness_name }}@<vm_ip> "curl -m 3 -sS http://127.0.0.1:11434/api/tags"
+# Conteneur couvert par le même filtre :
+ssh {{ harness_name }}@<vm_ip> "podman run --rm alpine wget -T3 -q -O- http://1.1.1.1"
+# Le filtre est-il RÉELLEMENT chargé ? (un run interrompu le laisse levé)
+ssh <admin>@<vm_ip> "sudo nft list table inet agent_egress"
+
+# Via le proxy, une fois la Phase 3 faite
 ssh {{ harness_name }}@<vm_ip> "curl -m 5 -sS -x http://127.0.0.1:<proxy_port> https://<domaine_allowlisté>"
 
 # Durcissement du harnais (après Phase 8)

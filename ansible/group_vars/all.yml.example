@@ -15,6 +15,10 @@ ssh_allow_tcp_forwarding: false # Set to true if SSH port forwarding/tunneling i
 gvisor_enabled: true
 gvisor_default: true # When true, gVisor (runsc) is used as the default OCI runtime for all containers
 
+# Egress control: filter the agent zone's outbound traffic by uid — loopback only,
+# name resolution included. Set to false to leave the outbound path unrestricted.
+agent_egress_filter_enabled: true
+
 # Node.js / NVM configuration
 nvm_version: "v0.40.6"
 nvm_node_version: "lts/*" # e.g. "lts/*", "22", "20"

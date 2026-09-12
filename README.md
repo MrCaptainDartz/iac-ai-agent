@@ -18,7 +18,7 @@ Infrastructure as Code (IaC) solution to automatically provision and configure h
      - **Resource Limits & Anti-DoS**: `limits.d` protection against fork bombs (`nproc 2048`), file descriptor exhaustion (`nofile 65536`), and core dump suppression.
      - **OS & Kernel Hardening**: `sysctl` kernel protections, memory sandbox (`yama.ptrace_scope = 1`), AppArmor enforce mode, `libpam-pwquality`, obsolete kernel modules blacklisting (`dccp`, `sctp`, `firewire`), and secure default `umask 027`.
      - **Automated Security Updates**: `unattended-upgrades` with `apt-daily.timer` and automatic kernel cleanups.
-     - **Ollama Security**: Explicit localhost binding (`127.0.0.1:11434`) via systemd override — this closes the **inbound** path, so the endpoint is not reachable from the network. It does not constrain **outbound** traffic: a model backed by a remote provider still generates egress, which is governed separately by the agent egress control ([TODO.md](TODO.md) Phase 1).
+     - **Ollama Security**: Explicit localhost binding (`127.0.0.1:11434`) via systemd override — this closes the **inbound** path, so the endpoint is not reachable from the network. It does not constrain **outbound** traffic: a model backed by a remote provider still generates egress, which the agent egress filter governs separately (see below).
    - **Modern Python & Developer Stack**: **`uv`** standalone manager with **Python 3.14**, Node.js (via NVM), global Git & Vim configurations, essential search & monitoring tools (`ripgrep`, `fd-find`, `btop`, `nvtop`), UFW firewall, and Ollama with automated model downloading.
 
 ---
@@ -72,6 +72,7 @@ Customize global settings as needed:
 - `ollama_enabled`: Set to `false` if using an external inference server (default: `true`).
 - `ollama_models`: List of models to pull automatically (e.g. `["qwen3:4b", "qwen3-embedding:0.6b"]`). The shipped default is a small local model; remote models are a deployment choice — declare them here and set `ollama_signin_required: true` if the provider needs an interactive login.
 - `ollama_signin_required`: Set to `true` if pulling models that require an interactive OAuth browser login (default: `false`).
+- `agent_egress_filter_enabled`: Filter the agent user's outbound traffic by uid — loopback only, name resolution included (default: `true`). Set to `false` to leave the outbound path unrestricted; table, unit and ruleset file are then removed.
 - `essential_packages_extra`: Additional custom system packages to install (e.g. `["zsh", "fish"]`).
 - `system_timezone_value`: Timezone (default: `"Europe/Paris"`).
 
@@ -106,6 +107,7 @@ The playbook will:
 - Install Podman Rootless with Docker/Compose compatibility layer and Google gVisor (`runsc`) as default runtime.
 - Configure UFW firewall, Node.js via NVM, and **`uv` with Python 3.14**.
 - Install Ollama (bound strictly to `127.0.0.1:11434`) and pull configured models (if enabled).
+- **Lock the sandbox down last**: filter the agent user's outbound traffic by uid — loopback only, name resolution included — leaving a manipulated model with no route off the machine.
 - Reboot the machine automatically only if pending kernel updates require it.
 
 ### Step 3: Connect & Launch Agent
@@ -148,8 +150,7 @@ ssh <harness_name>@<VM_IP_ADDRESS>
 - **Rootless User Namespaces**: Containers launched by the agent cannot reach the host. The agent process itself is **not** containerized: it runs bare on the VM.
 - **gVisor by Default**: Any container invocation (`podman run`, `docker run`, `docker compose up`) automatically runs within a user-space kernel sandbox to neutralize host kernel 0-day exploits. This confines **the containers the agent launches** — not the agent.
 - **Kernel & Memory Hardening**: Core dumps disabled, kernel pointers masked (`kptr_restrict`), dmesg restricted to root, obsolete network modules blacklisted.
-
-> **Known gap — agent egress is not yet constrained.** Nothing today limits what the agent user can reach on the network. A manipulated or misaligned model has a shell and an outbound path; the hardening above protects the VM, not against that. Closing this is Phase 1 of [TODO.md](TODO.md).
+- **Agent Egress Filter (nftables, per uid)**: The agent user's outbound traffic is dropped outside the loopback, **name resolution included** — a DNS query is a full outbound path, with the query name as payload. Containers the agent launches are covered whichever network mode they use. Hooked at `output priority -50`, ahead of UFW's chain, so a UFW `accept` cannot override it; UFW keeps the ingress and its own output policy. This is the control that answers a manipulated model, which the hardening above does not.
 
 ---
 

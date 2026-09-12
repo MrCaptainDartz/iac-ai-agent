@@ -1,0 +1,142 @@
+---
+# tasks file for agent_egress
+# Filters the agent zone's egress by uid: loopback only, no name resolution.
+
+- name: Install nftables
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+    update_cache: true
+  when: agent_egress_filter_enabled | default(true)
+
+# The harness uid is assigned by useradd and never fixed: it must be resolved here.
+- name: Get harness user UID
+  ansible.builtin.command:
+    cmd: "id -u {{ agent_egress_harness_name }}"
+  register: agent_egress_uid_result
+  changed_when: false
+  when: agent_egress_filter_enabled | default(true)
+
+# Containers using --network=host run under a subuid, not under the harness uid.
+- name: Read subordinate UID ranges
+  ansible.builtin.slurp:
+    src: /etc/subuid
+  register: agent_egress_subuid_raw
+  failed_when: false
+  when: agent_egress_filter_enabled | default(true)
+
+- name: Compute the set of uids to filter (harness uid + subordinate ranges)
+  ansible.builtin.set_fact:
+    agent_egress_uids: >-
+      {{ agent_egress_uid_result.stdout }}{% for line in agent_egress_subuid_lines
+      if line.split(':')[0] == agent_egress_harness_name %}, {{ line.split(':')[1] }}-{{
+      line.split(':')[1] | int + line.split(':')[2] | int - 1 }}{% endfor %}
+  vars:
+    agent_egress_subuid_lines: "{{ (agent_egress_subuid_raw.content | default('') | b64decode).splitlines() }}"
+  when: agent_egress_filter_enabled | default(true)
+
+- name: Create the nftables configuration directory
+  ansible.builtin.file:
+    path: "{{ agent_egress_ruleset_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: agent_egress_filter_enabled | default(true)
+
+- name: Deploy the agent egress ruleset
+  ansible.builtin.template:
+    src: agent-egress.nft.j2
+    dest: "{{ agent_egress_ruleset_path }}"
+    owner: root
+    group: root
+    mode: '0644'
+  when: agent_egress_filter_enabled | default(true)
+  notify: Reload agent egress ruleset
+
+- name: Deploy the agent egress systemd unit
+  ansible.builtin.template:
+    src: agent-egress.service.j2
+    dest: "/etc/systemd/system/{{ agent_egress_service_name }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+  when: agent_egress_filter_enabled | default(true)
+  notify: Reload agent egress ruleset
+
+# Never nftables.service: its stock /etc/nftables.conf flushes UFW's tables at boot.
+- name: Ensure the stock nftables service stays disabled
+  ansible.builtin.systemd_service:
+    name: nftables
+    state: stopped
+    enabled: false
+  failed_when: false
+  when: agent_egress_filter_enabled | default(true)
+
+- name: Enable the agent egress service
+  ansible.builtin.systemd_service:
+    name: "{{ agent_egress_service_name }}"
+    enabled: true
+    daemon_reload: true
+  when: agent_egress_filter_enabled | default(true)
+
+# A oneshot unit stays "active" after its ExecStart ran: check the live table, not the unit.
+- name: Check that the agent egress ruleset is loaded
+  ansible.builtin.command:
+    cmd: "{{ agent_egress_nft_binary }} list table inet agent_egress"
+  register: agent_egress_table_check
+  changed_when: false
+  failed_when: false
+  when: agent_egress_filter_enabled | default(true)
+
+- name: Apply the agent egress ruleset
+  ansible.builtin.systemd_service:
+    name: "{{ agent_egress_service_name }}"
+    state: restarted
+    daemon_reload: true
+  when:
+    - agent_egress_filter_enabled | default(true)
+    - agent_egress_table_check.rc | default(1) != 0
+
+# --- disabled: restore the previous state, live table included -----------------
+
+- name: Stop and disable the agent egress service
+  ansible.builtin.systemd_service:
+    name: "{{ agent_egress_service_name }}"
+    state: stopped
+    enabled: false
+  failed_when: false
+  when: not (agent_egress_filter_enabled | default(true))
+
+- name: Remove the agent egress systemd unit
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ agent_egress_service_name }}.service"
+    state: absent
+  when: not (agent_egress_filter_enabled | default(true))
+
+- name: Remove the agent egress ruleset
+  ansible.builtin.file:
+    path: "{{ agent_egress_ruleset_path }}"
+    state: absent
+  when: not (agent_egress_filter_enabled | default(true))
+
+- name: Read the live agent egress table
+  ansible.builtin.command:
+    cmd: "{{ agent_egress_nft_binary }} list table inet agent_egress"
+  register: agent_egress_live_table
+  changed_when: false
+  failed_when: false
+  when: not (agent_egress_filter_enabled | default(true))
+
+- name: Destroy the agent egress table
+  ansible.builtin.command:
+    cmd: "{{ agent_egress_nft_binary }} destroy table inet agent_egress"
+  changed_when: true
+  when:
+    - not (agent_egress_filter_enabled | default(true))
+    - agent_egress_live_table.rc | default(1) == 0
+
+- name: Reload the systemd manager configuration
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: not (agent_egress_filter_enabled | default(true))

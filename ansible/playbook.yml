@@ -8,6 +8,22 @@
         path: /var/lib/cloud/instance/boot-finished
         state: present
         timeout: 600
+
+    # Provisioning installs tooling as the harness user (nvm, npm) and needs the network this
+    # filter removes: lifted for the run, re-applied last. A run failing before that leaves it open.
+    - name: Check whether the agent egress filter is currently loaded
+      ansible.builtin.command:
+        cmd: /usr/sbin/nft list table inet agent_egress
+      register: agent_egress_filter
+      changed_when: false
+      failed_when: false
+
+    - name: Lift the agent egress filter for the duration of the run
+      ansible.builtin.command:
+        cmd: /usr/sbin/nft destroy table inet agent_egress
+      changed_when: true
+      when: agent_egress_filter.rc | default(1) == 0
+
   roles:
     - system_timezone
     - essential_packages
@@ -20,6 +36,8 @@
     - uv
     - role: ollama
       when: ollama_enabled | default(true)
+    # Last: locks the sandbox down and closes the pre_tasks window.
+    - agent_egress
   post_tasks:
     - name: Check if a reboot is required
       ansible.builtin.stat:
