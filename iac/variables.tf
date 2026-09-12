@@ -83,6 +83,7 @@ variable "vm_config" {
     bios              = optional(string, "ovmf")
     vga_type          = optional(string, "qxl")
     keyboard_layout   = optional(string, "fr")
+    rng_source        = optional(string, "/dev/urandom")
     start_on_boot     = optional(bool, true)
     tags              = optional(list(string), ["ai-agent", "opentofu"])
     pci_devices = optional(list(object({

@@ -151,6 +151,15 @@ resource "proxmox_virtual_environment_vm" "ubuntu_vm" {
     type = each.value.vga_type
   }
 
+  # Virtio-RNG device (hardware entropy source for the guest kernel).
+  # Set rng_source = null in vm_config to disable the device.
+  dynamic "rng" {
+    for_each = each.value.rng_source != null ? [each.value.rng_source] : []
+    content {
+      source = rng.value
+    }
+  }
+
   operating_system {
     type = "l26" # Linux 2.6 / 5.x / 6.x kernel
   }

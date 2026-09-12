@@ -53,6 +53,7 @@ ssh_public_key = "ssh-rsa AAAAB3NzaC1yc... myuser@myworkstation"
 #     # bios              = "ovmf"                # "ovmf" (UEFI) or "seabios"
 #     # vga_type          = "qxl"                 # "qxl" (SPICE), "std", "serial0", "none"
 #     # keyboard_layout   = "fr"                  # "fr", "en-us", etc.
+#     # rng_source        = "/dev/urandom"        # Virtio-RNG entropy source (null = disabled)
 #     # start_on_boot     = true
 #     # tags              = ["ai-agent", "opentofu"]
 #
