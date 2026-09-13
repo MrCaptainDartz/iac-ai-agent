@@ -16,7 +16,7 @@ Fournir une **sandbox d'exécution pour agent IA**, réutilisable et opensourcab
 2. **Composable.** Chaque capacité est un rôle activable par un flag, dans le style existant (`gvisor_enabled`, `ollama_enabled`, `security_hardening_*_enabled`). Rien d'obligatoire au-delà du socle.
 3. **Sans spécificité de déploiement.** Aucune valeur propre à une installation dans le code ou la doc : hôtes, IP, modèles, providers, allowlists, entrypoints et clés sont des variables. Un utilisateur doit pouvoir déployer sans modifier un template.
 
-> **Le projet livre des implémentations, pas seulement des abstractions.** Exactement comme `ollama` est *une* implémentation possible de l'inférence (`inference_provider`), le projet **livrera un** provider d'installation de harnais (`harness_provider: hermes`), à créer en Phase 8. C'est une commodité assumée, pas une entorse au principe : le socle reste agnostique, et supporter un autre harnais consiste à ajouter un rôle provider — le chemin prévu, documenté en Phase 8.
+> **Le projet livre des implémentations, pas seulement des abstractions.** Exactement comme `ollama` est *une* implémentation possible de l'inférence (derrière la table d'alias du gateway), le projet **livrera un** provider d'installation de harnais (`harness_provider: hermes`), à créer en Phase 8. C'est une commodité assumée, pas une entorse au principe : le socle reste agnostique, et supporter un autre harnais consiste à ajouter un rôle provider — le chemin prévu, documenté en Phase 8.
 
 ### Ce que la sécurité doit réellement protéger
 
@@ -73,13 +73,13 @@ Le socle d'isolation multi-couches est en place. **« Déployé » ne veut pas d
 │  │   │  Sandbox des conteneurs LANCÉS PAR l'agent, pas de l'agent     │   │  │
 │  │   └───────────────────────────────────────────────────────────────┘   │  │
 │  │                                                                        │  │
-│  │   ZONE DE CONFIANCE — OPTIONNELLE   uid={{ broker_name }}              │  │
-│  │   Déployée seulement si un composant détient un secret.                │  │
-│  │   • Gateway d'inférence  → provider, clé injectée (Phase 2)            │  │
+│  │   ZONE DE CONFIANCE   uid={{ broker_name }} (0700, nologin)            │  │
+│  │   Tout composant qui détient un secret. N'exécute jamais de code       │  │
+│  │   produit par le modèle.                                               │  │
+│  │   • Gateway d'inférence  → provider, clé détenue (fait, Ph. 2)         │  │
 │  │   • Proxy egress L7      → internet, allowlist (Phase 3)               │  │
 │  │   • Broker Kubernetes    → kube-apiserver, jeton RO injecté (Phase 4)  │  │
 │  │   • Broker git           → forge, token injecté (Phase 5)              │  │
-│  │   N'exécute jamais de code du modèle.                                  │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -95,6 +95,7 @@ Le proxy L7 est la **brique d'adaptation** : elle permet de déclarer une politi
 5. **Surveillance** : fail2ban + action UFW, `unattended-upgrades` + `apt-daily.timer`, auditd, AppArmor enforce, `libpam-pwquality`.
 6. **Utilisateur harnais** : non-root, home `0750`, linger systemd. Le sudoers scopé (`systemctl restart`) référence une unité qui n'existe qu'à partir de la Phase 8.
 7. **Egress de la zone agent** : filtré par uid (table nftables `agent_egress`, chargée par `agent-egress.service`) — loopback seul, résolution de noms comprise, conteneurs couverts. Appliqué en dernier rôle du play ; voir Phase 1 pour l'ordre et la fenêtre assumée.
+8. **Gateway d'inférence** (`inference-gateway.service`) : porte d'entrée loopback portée par la **zone de confiance** (`broker`), table d'alias obligatoire — l'agent nomme un rôle, jamais un modèle du provider — et clé du provider détenue par le gateway. Le port amont du provider est fermé à la zone agent, donc le gateway est le seul chemin vers un modèle.
 
 ---
 
@@ -113,14 +114,14 @@ Chaque composant est un rôle activable, dans le style existant.
 | Broker git (propositions de PR) | `git_broker` | `git_broker_enabled` | Extension |
 | Installation du harnais (provider livré) | `harness_hermes` | `harness_provider: hermes` | Phase 8, **à créer** |
 | Sécurisation du harnais (unité systemd) | `harness_service` | `harness_service_enabled` | Phase 8 |
-| Zone de confiance (utilisateur système) | dépendance des brokers, du proxy en niveau 2, et du gateway s'il détient une clé | — | Créée à la demande |
+| Zone de confiance (utilisateur système) | `trust_zone` | `trust_zone_enabled` | Dépendance du gateway et des brokers |
 
 **Exemples d'assemblages visés :**
 
-- *Agent conversationnel* : zone agent + conteneurs + gateway d'inférence. Pas de zone de confiance si le provider est local et sans clé.
+- *Agent conversationnel* : zone agent + conteneurs + gateway d'inférence.
 - *Agent avec navigation web* : socle + proxy L7 niveau 1, allowlist déclarée par le déploiement.
 - *Agent SRE k3s* : socle + `k8s_broker` + `git_broker`.
-- *Agent avec API d'inférence distante* : socle + gateway qui détient la clé (donc zone de confiance).
+- *Agent avec API d'inférence distante* : socle, la clé restant dans la zone de confiance.
 
 ### Variables (conventions existantes)
 
@@ -133,12 +134,22 @@ harness_name: "hermes"              # hermes, openclaw, smolagents, ...
 # --- Socle ---
 agent_egress_filter_enabled: true   # filtre l'egress de la zone agent (loopback seul)
 
+# --- Zone de confiance ---
+broker_name: "broker"               # utilisateur système ; tout composant qui détient un secret
+
 # --- Inférence : le provider est un choix de l'utilisateur ---
 inference_gateway_enabled: true
-inference_provider: "ollama"        # "ollama" (local) ou "external" (API distante)
-inference_upstream_url: "http://127.0.0.1:11434"
-# Pour un provider distant, la clé vit côté gateway, jamais côté harnais :
-# inference_api_key: "{{ vault_inference_api_key }}"
+inference_gateway_port: 4000
+inference_gateway_upstream_url: "http://127.0.0.1:11434"  # amont local ; son port est fermé à l'agent
+# Table d'alias obligatoire : alias vu par l'agent -> modèle réel du provider. Le préfixe
+# choisit l'endpoint amont (ollama_chat/ pour le chat, ollama/ pour les embeddings).
+inference_gateway_models:
+  - alias: reasoning
+    model: "ollama_chat/<modèle-de-raisonnement>"
+#   - alias: reasoning
+#     model: "deepseek/<modèle>"      # la clé est détenue par le gateway, jamais par le harnais
+#     api_key: "<clé>"
+inference_gateway_debug_logging: false  # flux de débogage, pas une piste d'audit
 
 # --- Proxy egress L7 (brique d'adaptation) ---
 agent_egress_proxy_enabled: false       # false : la zone agent n'a aucun egress web
@@ -146,7 +157,6 @@ agent_egress_proxy_allowlist: []        # domaines autorisés, déclarés par d�
 agent_egress_proxy_tls_intercept: false # niveau 2 : inspection (CA interne, opt-in)
 
 # --- Extensions optionnelles ---
-broker_name: "broker"               # utilisateur système de la zone de confiance
 k8s_broker_enabled: false
 git_broker_enabled: false
 
@@ -244,17 +254,56 @@ table inet agent_egress {
 - **`nvm` exécute `npm update -g` sans condition** à chaque run : c'est ce qui rend la levée du filtre nécessaire, et une surface de supply chain à revoir (Phase 6).
 - **`sudo -u {{ harness_name }}` depuis `/home/ubuntu`** échoue (`0750` sur les deux homes) : préfixer par `cd /tmp` ou `-H`.
 
-#### 🌟 Phase 2 — Gateway d'inférence
+#### ✅ Phase 2 — Gateway d'inférence *(faite)*
 
-Composant qui rend le **provider d'inférence interchangeable** : Ollama local, API distante, ou autre. Sert aussi de point d'application pour les transformations de prompt.
+Composant qui rend le **provider d'inférence interchangeable** et qui soustrait au harnais jusqu'au **nom** des modèles : l'agent demande un rôle (`reasoning`, `execution`), la table d'alias traduit vers le modèle réel. Changer de provider ne touche pas la configuration de l'agent.
 
-- [ ] Reverse proxy loopback, **HTTP simple** : le provider est joignable en local (Ollama) ou le gateway fait lui-même le TLS amont. Pas de CA interne, pas de MITM.
-- [ ] **Injection de la clé du provider** : si le provider en exige une, c'est le gateway qui la détient — jamais le harnais. C'est ce qui décide si le gateway rejoint la zone de confiance (règle du §0).
-- [ ] **Ordre canonique du préfixe** pour les cache-hits : partie invariante (system prompt, tools, contexte) *octet pour octet identique* en tête, partie volatile en queue. Sérialisation déterministe : **aucun timestamp, UUID, ni ordre de dict non déterministe dans le préfixe**.
-- [ ] Compression de la partie volatile (augmente le *ratio* de préfixe caché).
-- [ ] Logs prompt/réponse (audit) et **quotas de tokens** — un agent en boucle peut épuiser un budget d'API.
-- [ ] Allowlist de modèles, configurable. **Ne rien présupposer du provider** : les modèles distants et locaux doivent être également possibles.
-- [ ] Le rôle `ollama` existant reste tel quel (optionnel, `ollama_enabled`) ; le gateway est une couche au-dessus, pas un remplacement.
+Implémentation : **litellm** (`inference-gateway.service`), HTTP simple sur `127.0.0.1:4000`, sans CA ni interception TLS (niveau 2 = Phase 3).
+
+- [x] Reverse proxy loopback, HTTP simple : le provider peut être local (Ollama) ou distant, et c'est le gateway qui fait le TLS amont.
+- [x] **Clé du provider détenue par le gateway**, référencée en `os.environ/...` depuis un fichier d'environnement en `0600` : ni dans le config, ni dans un diff, ni dans l'espace du harnais.
+- [x] **Table d'alias obligatoire** — alias vu par l'agent → modèle réel. Un modèle non déclaré est refusé en **400** (`ProxyModelNotFoundError`) : c'est une allowlist stricte, sans mécanisme séparé.
+- [x] **Zone de confiance** : le gateway tourne sous `broker`, jamais sous l'uid du harnais, **même sans clé** — un seul chemin de code, et l'agent ne peut ni l'arrêter ni lire sa config.
+- [x] **Port amont fermé à la zone agent** (`agent_egress_blocked_loopback_ports`, dérivé de `inference_gateway_upstream_url`) : sans ça l'agent appelle Ollama en direct et la table d'alias ne restreint rien.
+- [x] `inference_gateway_enabled: false` retire unité, config et venv **et rouvre le port amont** (vérifié). Rebond après reboot et réversibilité vérifiés sur la VM.
+- [x] Le rôle `ollama` existant reste **inchangé** : le gateway est une couche au-dessus, pas un remplacement.
+
+**Deux pièges d'ordre, trouvés par les tests de réversibilité :**
+
+- **`trust_zone` tourne avant ses dépendants**, donc au tear-down `userdel` échoue (« user broker is currently used by process N ») : le service du gateway tourne encore sous cet uid. Le rôle arrête donc les unités listées dans `trust_zone_dependent_units` avant de supprimer le compte — vérifié : plus aucun processus sous un uid supprimé après coup.
+- **Zone désactivée alors que le gateway la réclame** : le play échoue **proprement**, avec un message qui dit quoi faire (`trust_zone_enabled`, ou `inference_gateway_user`). Un échec bruyant vaut mieux qu'une unité déployée avec un `User=` inexistant.
+
+**Ce que les mesures ont établi** — trois leviers supposés se sont révélés **inertes**, et c'est le genre d'erreur qui ne se voit pas à l'œil nu :
+
+| Point | Résultat mesuré |
+|---|---|
+| Préfixe du provider | `ollama_chat/` frappe `/api/chat` (tool calling) ; `ollama/` frappe `/api/generate` — et **l'endpoint embeddings n'est mappé que pour `ollama/`**. Un préfixe unique ne peut donc pas servir un modèle de chat **et** un modèle d'embedding : le préfixe se déclare **par alias**. Constaté en 400 « Unmapped LLM provider for this endpoint ». |
+| Quotas `rpm`/`tpm` | **Non appliqués** : 80 requêtes parallèles, 80 × 200. Ce sont des entrées de *routage*, pas un limiteur. |
+| `max_parallel_requests` + `enable_pre_call_checks` | **Non appliqués** : 6 concurrentes passées pour une limite de 4. |
+| `global_max_parallel_requests` | **Non appliqué** : 6 concurrentes pour une limite de 3. |
+| `turn_off_message_logging` | Rien de visible ; `DETAILED_DEBUG` journalise bien le prompt (**5 occurrences**), mais au prix de **135 lignes de journal pour une seule requête** d'embedding. Flux de débogage, pas piste d'audit → le flag porte son vrai nom. |
+| Interpréteur du venv | `uv` installe CPython sous **`/root`**, hors de portée de `broker` — et `ProtectHome=true` masque `/root` de toute façon. Le venv reste **root-owned** pour que le service ne puisse pas réécrire le code qu'il exécute (`ProtectSystem=strict`) : `UV_PYTHON_INSTALL_DIR` déplace l'interpréteur, et le groupe donne la lecture seule. |
+
+**Ordre dans le play** : `trust_zone` puis `inference_gateway`, après `ollama` et avant `agent_egress` qui reste **dernier**.
+
+**Corrigé après une review externe :** `api_base` n'est plus appliqué qu'aux modèles du provider **local** (`ollama`/`ollama_chat`) — un modèle distant partait sinon vers l'URL locale d'Ollama ; les règles de blocage du port amont couvrent désormais **IPv6** (`ip6 daddr ::1`, compteur vérifié à 4 paquets) alors que la leçon IPv6 de la Phase 1 n'y avait pas été appliquée ; un **pré-vol** dans `pre_tasks` valide la table d'alias **avant** la levée du filtre, pour qu'un run voué à l'échec n'ouvre pas la zone agent ; `broker_name == harness_name` est refusé (les deux zones fusionneraient sous un uid).
+
+**Deux points de cette review ont été rejetés, mesures à l'appui** — à ne pas re-litiger sans fait nouveau :
+
+| Point | Ce qui a été mesuré |
+|---|---|
+| Entourer les clés de guillemets dans `gateway.env` (« un `#` interne serait vu comme un commentaire ») | **Faux** : `PLAIN=ab#cd ef` se charge en `[ab#cd ef]`. Et la correction **dégraderait** le cas réel : un espace de fin collé avec la clé est supprimé sans guillemets (`[abc]`) mais **préservé** avec (`[abc ]`), ce qui casserait l'authentification. |
+| Conditionner le chown récursif du venv à la version installée (« 30-60 s par run ») | **2,05 s** mesurées pour **20 018 fichiers**. Et le gating rouvrirait le trou « groupe changé, version inchangée » : `broker_name` modifié → accès perdu sans que rien ne le signale. |
+
+**Défaut trouvé en corrigeant :** `.version` était écrit **après** le chown récursif, donc le run suivant devait rattraper — idempotence décalée d'un run à chaque changement de version. Le chown est désormais la dernière étape du bloc.
+
+**Ce qui reste dehors, et pourquoi :**
+
+- **Ordre canonique du préfixe** et **compression de la partie volatile** : ce sont des contrats du **harnais** — c'est le client qui construit la requête. Un proxy qui réécrit le contenu envoyé est un piège de débogage. À documenter en Phase 8, pas à implémenter ici.
+- **Quotas de tokens** : litellm ne les applique pas sans Redis (suivi d'usage) ni base de données (budgets, clés virtuelles). Ce serait un composant de plus, avec son propre secret, pour une borne que la Phase 7 peut obtenir par l'observation. Décision : **pas de quota**, mesures ci-dessus à l'appui.
+- **Redaction** : `turn_off_message_logging: true` est le défaut, mais aucun callback n'est configuré — c'est une protection **prospective**, pas un contrôle actif. Dit tel quel plutôt que présenté comme acquis.
+
+**Trouvaille à traiter en Phase 7.** Les routes d'administration de litellm sont sur le loopback, donc **joignables par l'agent** (`/health`, `/metrics`, `/key/*`). Sans base de données, `model_list` n'est pas modifiable à chaud et la clé du provider n'est jamais renvoyée : l'impact est faible, mais c'est un chemin que l'agent a et que `make audit` doit connaître. L'UI d'admin est désactivée.
 
 ### Brique d'adaptation
 
@@ -382,16 +431,17 @@ server {
 À faire **avant** d'installer le harnais (Phase 8) : rien ne doit tourner sans être audité.
 
 - [ ] Règles auditd `execve` sur l'uid du harnais : rend visible l'exploitation d'une injection en RCE.
-- [ ] Logs des composants de la zone de confiance **et du proxy L7** → cible commune, **non inscriptible par la zone agent**. Principal artefact de détection d'exfiltration.
+- [ ] Logs des composants de la zone de confiance **et du proxy L7** → cible commune, **non inscriptible par la zone agent**. Principal artefact de détection d'exfiltration — **piste d'audit des prompts comprise**, que le gateway ne fournit pas aujourd'hui (`DETAILED_DEBUG` n'est qu'un flux de débogage, 135 lignes par requête).
 - [ ] Expédition distante des logs (une VM compromise ne doit pas pouvoir effacer ses traces).
-- [ ] `make audit` qui **assère** l'état réel : règles d'egress (et **table `agent_egress` chargée** — sans quoi un run interrompu laisse la zone agent ouverte sans le dire), UFW, durcissement des unités, absence de credential hors zone de confiance.
+- [ ] Auditer ce que les routes d'admin du gateway exposent à l'agent (`/health`, `/metrics`, `/key/*`) : chemin connu depuis la Phase 2, impact faible sans base de données, mais c'est un chemin que l'agent a.
+- [ ] `make audit` qui **assère** l'état réel : règles d'egress (et **table `agent_egress` chargée** — sans quoi un run interrompu laisse la zone agent ouverte sans le dire), UFW, **`inference-gateway` actif sous l'utilisateur de la zone de confiance**, durcissement des unités, absence de credential hors zone de confiance.
 - [ ] Alerting sur anomalies (nouvelle destination, upload volumineux, nouveau processus).
 
 ### Harnais
 
 #### 🌟 Phase 8 — Installation et sécurisation du harnais
 
-**Périmètre.** Le socle ne présuppose rien du harnais et **ne l'installe pas** : il sécurise l'environnement d'exécution autour de lui. L'installation est déléguée à un **provider interchangeable**, sur le même patron que `inference_provider` pour l'inférence.
+**Périmètre.** Le socle ne présuppose rien du harnais et **ne l'installe pas** : il sécurise l'environnement d'exécution autour de lui. L'installation est déléguée à un **provider interchangeable**, sur le même patron que la table d'alias pour l'inférence.
 
 - `harness_provider: "hermes"` → le rôle `harness_hermes` livré par le projet installe le harnais et définit `harness_exec_start` par défaut.
 - `harness_provider: "none"` → installation manuelle : le déployeur installe son harnais et renseigne `harness_exec_start`.
@@ -501,13 +551,16 @@ ssh {{ harness_name }}@<vm_ip>   # zone agent
 ssh {{ harness_name }}@<vm_ip> "docker run --rm alpine uname -a"
 # Attendu : Linux ... 4.19.0-gvisor ...
 
-# Provider d'inférence, en local
-ssh {{ harness_name }}@<vm_ip> "curl -s http://127.0.0.1:11434/api/tags"
+# Gateway d'inférence (Phase 2), depuis la zone agent : les alias déclarés
+ssh {{ harness_name }}@<vm_ip> "curl -s http://127.0.0.1:4000/v1/models"
+# Le port amont du provider est fermé à la zone agent — attendu en échec (rc=28)
+ssh {{ harness_name }}@<vm_ip> "curl -m 4 -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:11434/api/tags"
+# Le gateway tourne-t-il bien hors de l'uid du harnais ?
+ssh <admin>@<vm_ip> "systemctl show inference-gateway -p User -p ActiveState"
 
 # Egress (Phase 1) : la zone agent ne sort pas, le loopback reste ouvert
 ssh {{ harness_name }}@<vm_ip> "curl -m 3 -sS -o /dev/null -w '%{http_code}\n' https://example.com"
-# Attendu : échec (résolution comprise). Puis, depuis la zone agent :
-ssh {{ harness_name }}@<vm_ip> "curl -m 3 -sS http://127.0.0.1:11434/api/tags"
+# Attendu : échec (résolution comprise).
 # Conteneur couvert par le même filtre :
 ssh {{ harness_name }}@<vm_ip> "podman run --rm alpine wget -T3 -q -O- http://1.1.1.1"
 # Le filtre est-il RÉELLEMENT chargé ? (un run interrompu le laisse levé)
@@ -528,4 +581,4 @@ tofu -chdir=iac validate && ansible-lint
 
 ### 📌 Point de départ recommandé
 
-**Phases 0 et 1 faites** (documentation corrigée ; egress de la zone agent filtré et vérifié). Prochaine étape : **Phase 2** (gateway d'inférence), puis **Phase 3** (proxy L7, dès qu'un déploiement a besoin d'un egress web déclaré). Les **Phases 4 et 5** ne sont à faire que si un cas d'usage le demande, et **Phase 8** une fois le harnais choisi et installable.
+**Phases 0, 1 et 2 faites** (documentation corrigée ; egress de la zone agent filtré ; gateway d'inférence en zone de confiance, table d'alias et port amont fermé). Prochaine étape : **Phase 3** (proxy L7, dès qu'un déploiement a besoin d'un egress web déclaré), puis **Phase 7** (observabilité : elle porte la piste d'audit des prompts et l'audit des routes d'admin du gateway). Les **Phases 4 et 5** ne sont à faire que si un cas d'usage le demande, et **Phase 8** une fois le harnais choisi et installable.

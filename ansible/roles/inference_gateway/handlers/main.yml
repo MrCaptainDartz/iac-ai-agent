@@ -1,0 +1,7 @@
+---
+# handlers file for inference_gateway
+- name: Restart inference gateway
+  ansible.builtin.systemd_service:
+    name: "{{ inference_gateway_service_name }}"
+    state: restarted
+    daemon_reload: true

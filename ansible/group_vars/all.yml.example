@@ -46,3 +46,29 @@ ollama_signin_required: false
 ollama_models:
   - qwen3:4b
   - qwen3-embedding:0.6b
+
+# Trust zone: the system user that runs components holding a secret (the gateway today, the
+# brokers later). It never executes code produced by the model.
+trust_zone_enabled: true
+broker_name: "broker"
+
+# Inference gateway: the agent asks for a role alias, never for a provider model, so its own
+# configuration does not change when the provider does. The alias table is REQUIRED.
+inference_gateway_enabled: true
+inference_gateway_port: 4000
+inference_gateway_upstream_url: "http://127.0.0.1:11434" # local provider; its port is closed to the agent zone
+
+# Alias the agent sees -> real provider model. Prefix picks the endpoint: ollama_chat/ for chat
+# (tool calling), ollama/ for embeddings. api_base applies to local models only.
+inference_gateway_models:
+  - alias: reasoning
+    model: "ollama_chat/qwen3:4b"
+  - alias: embedding
+    model: "ollama/qwen3-embedding:0.6b"
+#   - alias: reasoning
+#     model: "deepseek/deepseek-v4"
+#     api_key: "<key>"
+
+# litellm's detailed debug stream — prompts included, hundreds of journal lines per request.
+# It is a debugging aid, not an audit trail: Phase 7 owns the real log sink.
+inference_gateway_debug_logging: false

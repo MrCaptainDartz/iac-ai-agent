@@ -1,0 +1,19 @@
+---
+# defaults file for inference_gateway
+inference_gateway_enabled: true
+inference_gateway_service_name: inference-gateway
+inference_gateway_user: "{{ trust_zone_user | default(broker_name | default('broker')) }}"
+inference_gateway_home: "{{ trust_zone_home | default('/var/lib/' ~ inference_gateway_user) }}"
+inference_gateway_port: 4000
+# Default api_base for every alias, and the port agent_egress closes to the agent zone.
+inference_gateway_upstream_url: "http://127.0.0.1:11434"
+inference_gateway_models: []
+inference_gateway_debug_logging: false
+inference_gateway_version: "1.100.1"
+inference_gateway_python: "3.12"
+inference_gateway_config_dir: /etc/inference-gateway
+inference_gateway_root: /opt/inference-gateway
+inference_gateway_venv_dir: "{{ inference_gateway_root }}/venv"
+inference_gateway_python_dir: "{{ inference_gateway_root }}/python"
+inference_gateway_config_file: "{{ inference_gateway_config_dir }}/config.yaml"
+inference_gateway_env_file: "{{ inference_gateway_config_dir }}/gateway.env"

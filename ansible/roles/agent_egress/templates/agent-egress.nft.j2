@@ -14,6 +14,18 @@ table inet agent_egress {
     meta skuid { {{ agent_egress_uids }} } ip daddr 127.0.0.0/8 tcp dport 53 counter drop
     meta skuid { {{ agent_egress_uids }} } ip6 daddr ::1 udp dport 53 counter drop
     meta skuid { {{ agent_egress_uids }} } ip6 daddr ::1 tcp dport 53 counter drop
+{% if agent_egress_blocked_loopback_ports | length > 0 %}
+
+    # Gateway front door: the provider's own port is not reachable from the agent zone.
+{% for port in agent_egress_blocked_loopback_ports %}
+{% if port | int > 0 %}
+    meta skuid { {{ agent_egress_uids }} } ip daddr 127.0.0.0/8 tcp dport {{ port }} counter drop
+    meta skuid { {{ agent_egress_uids }} } ip daddr 127.0.0.0/8 udp dport {{ port }} counter drop
+    meta skuid { {{ agent_egress_uids }} } ip6 daddr ::1 tcp dport {{ port }} counter drop
+    meta skuid { {{ agent_egress_uids }} } ip6 daddr ::1 udp dport {{ port }} counter drop
+{% endif %}
+{% endfor %}
+{% endif %}
 
     # Loopback only. Subuid ranges cover --network=host containers; others exit as the harness uid.
     meta skuid { {{ agent_egress_uids }} } ip daddr != 127.0.0.0/8 \

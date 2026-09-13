@@ -1,0 +1,22 @@
+# Inference gateway config (Ansible Managed)
+# The agent never names a provider model: it names a role alias, translated here.
+
+model_list:
+{% for model in inference_gateway_models %}
+  - model_name: {{ model.alias }}
+    litellm_params:
+      model: {{ model.model }}
+{# Local models only: a remote one would otherwise be sent to the local URL. #}
+{% if model.api_base is defined %}
+      api_base: {{ model.api_base }}
+{% elif model.model.split('/')[0] in ['ollama', 'ollama_chat'] %}
+      api_base: {{ inference_gateway_upstream_url }}
+{% endif %}
+{% if model.api_key is defined %}
+      api_key: os.environ/INFERENCE_GATEWAY_KEY_{{ loop.index }}
+{% endif %}
+{% endfor %}
+
+litellm_settings:
+  # Message content never reaches a logging callback.
+  turn_off_message_logging: true

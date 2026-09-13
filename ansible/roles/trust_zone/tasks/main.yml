@@ -1,0 +1,52 @@
+---
+# tasks file for trust_zone
+# System user: any component holding a secret runs here, never under the harness uid.
+
+- name: Validate trust_zone_user format
+  ansible.builtin.assert:
+    that:
+      - trust_zone_user is defined
+      - trust_zone_user is string
+      - trust_zone_user is match('^[a-z0-9-]+$')
+      - trust_zone_user != (harness_name | default('hermes'))
+    fail_msg: >-
+      Invalid trust_zone_user '{{ trust_zone_user }}': lowercase letters, digits and hyphens only,
+      and never the harness user — the two zones would share one uid.
+    success_msg: "Valid trust_zone_user: {{ trust_zone_user }}"
+  when: trust_zone_enabled | default(true)
+
+- name: Create the trust zone system user
+  ansible.builtin.user:
+    name: "{{ trust_zone_user }}"
+    comment: "Trust Zone Service User - {{ trust_zone_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: true
+    home: "{{ trust_zone_home }}"
+    state: present
+  when: trust_zone_enabled | default(true)
+
+# 0700, not 0750 like the harness: the agent zone stays out.
+- name: Restrict the trust zone home directory
+  ansible.builtin.file:
+    path: "{{ trust_zone_home }}"
+    owner: "{{ trust_zone_user }}"
+    group: "{{ trust_zone_user }}"
+    mode: '0700'
+    state: directory
+  when: trust_zone_enabled | default(true)
+
+- name: Stop the services running as the trust zone user
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+  loop: "{{ trust_zone_dependent_units }}"
+  failed_when: false
+  when: not (trust_zone_enabled | default(true))
+
+- name: Remove the trust zone system user
+  ansible.builtin.user:
+    name: "{{ trust_zone_user }}"
+    state: absent
+    remove: true
+  when: not (trust_zone_enabled | default(true))

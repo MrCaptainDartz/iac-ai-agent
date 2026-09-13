@@ -1,0 +1,183 @@
+---
+# tasks file for inference_gateway
+# Loopback HTTP front door: the harness holds no provider key and names no provider model.
+
+- name: Resolve the gateway user
+  ansible.builtin.command:
+    cmd: "id -u {{ inference_gateway_user }}"
+  register: inference_gateway_user_check
+  changed_when: false
+  failed_when: false
+  when: inference_gateway_enabled | default(true)
+
+- name: Assert the trust zone user exists
+  ansible.builtin.assert:
+    that:
+      - inference_gateway_user_check.rc | default(1) == 0
+    fail_msg: >-
+      User '{{ inference_gateway_user }}' does not exist. The gateway runs in the trust zone:
+      deploy it (trust_zone_enabled) or point inference_gateway_user at an existing user.
+  when: inference_gateway_enabled | default(true)
+
+- name: Validate the declared alias table
+  ansible.builtin.assert:
+    that:
+      - inference_gateway_models | selectattr('alias', 'undefined') | list | length == 0
+      - inference_gateway_models | selectattr('model', 'undefined') | list | length == 0
+    fail_msg: "Every inference_gateway_models entry needs both 'alias' and 'model'."
+  when: inference_gateway_enabled | default(true)
+
+- name: Assert the alias table is declared
+  ansible.builtin.assert:
+    that:
+      - inference_gateway_models | length > 0
+    fail_msg: >-
+      inference_gateway_enabled is true but inference_gateway_models is empty. The alias table is
+      the gateway's contract: declare {alias, model} entries, e.g. reasoning -> ollama_chat/<model>
+      for chat (tool calling) and embedding -> ollama/<model> for the embeddings endpoint.
+  when: inference_gateway_enabled | default(true)
+
+- name: Create the gateway configuration directory
+  ansible.builtin.file:
+    path: "{{ inference_gateway_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ inference_gateway_user }}"
+    mode: '0750'
+  when: inference_gateway_enabled | default(true)
+
+# Root-owned so the service cannot rewrite the code it runs (ProtectSystem=strict reinforces it).
+- name: Create the gateway virtualenv
+  ansible.builtin.command:
+    cmd: "sh -c 'umask 027 && uv venv --python {{ inference_gateway_python }} {{ inference_gateway_venv_dir }}'"
+    creates: "{{ inference_gateway_venv_dir }}/bin/python"
+  environment:
+    PATH: "/usr/local/bin:{{ ansible_facts['env']['PATH'] | default('/usr/bin:/bin') }}"
+    # Otherwise uv installs the interpreter under /root, out of the gateway user's reach.
+    UV_PYTHON_INSTALL_DIR: "{{ inference_gateway_python_dir }}"
+  when: inference_gateway_enabled | default(true)
+
+- name: Read the installed gateway version
+  ansible.builtin.slurp:
+    src: "{{ inference_gateway_venv_dir }}/.version"
+  register: inference_gateway_version_stamp
+  failed_when: false
+  when: inference_gateway_enabled | default(true)
+
+- name: Install the pinned gateway version
+  ansible.builtin.command:
+    cmd: "sh -c 'umask 027 && uv pip install --python {{ inference_gateway_venv_dir }}/bin/python \"litellm[proxy]=={{ inference_gateway_version }}\"'"
+  environment:
+    PATH: "/usr/local/bin:{{ ansible_facts['env']['PATH'] | default('/usr/bin:/bin') }}"
+  when:
+    - inference_gateway_enabled | default(true)
+    - inference_gateway_version_stamp.content | default('') | b64decode | trim != inference_gateway_version
+  changed_when: true
+  notify: Restart inference gateway
+
+- name: Record the installed gateway version
+  ansible.builtin.copy:
+    content: "{{ inference_gateway_version }}\n"
+    dest: "{{ inference_gateway_venv_dir }}/.version"
+    owner: root
+    group: root
+    mode: '0644'
+  when:
+    - inference_gateway_enabled | default(true)
+    - inference_gateway_version_stamp.content | default('') | b64decode | trim != inference_gateway_version
+
+# Group read-only: 0750/0640 from the umask, so the trust zone reads but never writes.
+- name: Give the gateway user read access to its virtualenv
+  ansible.builtin.file:
+    path: "{{ inference_gateway_root }}"
+    state: directory
+    owner: root
+    group: "{{ inference_gateway_user }}"
+    recurse: true
+  when: inference_gateway_enabled | default(true)
+
+- name: Deploy the gateway configuration
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: "{{ inference_gateway_config_file }}"
+    owner: root
+    group: "{{ inference_gateway_user }}"
+    mode: '0640'
+  when: inference_gateway_enabled | default(true)
+  notify: Restart inference gateway
+
+# Secrets are only in this file: the config references them as os.environ/...
+- name: Deploy the gateway environment file
+  ansible.builtin.template:
+    src: gateway.env.j2
+    dest: "{{ inference_gateway_env_file }}"
+    owner: root
+    group: "{{ inference_gateway_user }}"
+    mode: '0600'
+  when: inference_gateway_enabled | default(true)
+  notify: Restart inference gateway
+  no_log: "{{ inference_gateway_models | selectattr('api_key', 'defined') | list | length > 0 }}"
+
+- name: Deploy the gateway systemd unit
+  ansible.builtin.template:
+    src: inference-gateway.service.j2
+    dest: "/etc/systemd/system/{{ inference_gateway_service_name }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+  when: inference_gateway_enabled | default(true)
+  notify: Restart inference gateway
+
+- name: Enable the gateway service
+  ansible.builtin.systemd_service:
+    name: "{{ inference_gateway_service_name }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  when: inference_gateway_enabled | default(true)
+
+- name: Flush handlers so the gateway is checked as configured
+  ansible.builtin.meta: flush_handlers
+  when: inference_gateway_enabled | default(true)
+
+# The effect, not the unit state: a service can report "active" and serve nothing.
+- name: Check that the gateway answers on its loopback port
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ inference_gateway_port }}"
+    state: started
+    timeout: 60
+  when: inference_gateway_enabled | default(true)
+
+# --- disabled: restore the previous state, service and files included --------
+
+- name: Stop and disable the gateway service
+  ansible.builtin.systemd_service:
+    name: "{{ inference_gateway_service_name }}"
+    state: stopped
+    enabled: false
+  failed_when: false
+  when: not (inference_gateway_enabled | default(true))
+
+- name: Remove the gateway systemd unit
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ inference_gateway_service_name }}.service"
+    state: absent
+  when: not (inference_gateway_enabled | default(true))
+
+- name: Remove the gateway configuration directory
+  ansible.builtin.file:
+    path: "{{ inference_gateway_config_dir }}"
+    state: absent
+  when: not (inference_gateway_enabled | default(true))
+
+- name: Remove the gateway virtualenv and its interpreter
+  ansible.builtin.file:
+    path: "{{ inference_gateway_root }}"
+    state: absent
+  when: not (inference_gateway_enabled | default(true))
+
+- name: Reload the systemd manager configuration
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: not (inference_gateway_enabled | default(true))

@@ -1,0 +1,26 @@
+# Inference gateway (Ansible Managed)
+[Unit]
+Description=Inference gateway ({{ inference_gateway_service_name }})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ inference_gateway_user }}
+Group={{ inference_gateway_user }}
+EnvironmentFile={{ inference_gateway_env_file }}
+# One worker: one agent, one model set — more would only duplicate state.
+ExecStart={{ inference_gateway_venv_dir }}/bin/litellm --host 127.0.0.1 --port {{ inference_gateway_port }} --config {{ inference_gateway_config_file }} --num_workers 1
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ inference_gateway_home }}
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
