@@ -284,7 +284,7 @@ Composant qui rend le **provider d'inférence interchangeable** : Ollama local, 
 - [ ] **Journaliser chaque requête** (destination, statut, taille) → principal artefact de détection d'exfiltration (Phase 7).
 - [ ] Quotas / rate-limits par destination, pour borner un agent en boucle.
 - [ ] `agent_egress_proxy_tls_intercept: false` par défaut, et la documentation doit dire ce que le niveau 2 coûte avant de l'activer.
-- [ ] **Egress du proxy : rien à ajouter à la Phase 1.** UFW est en `DEFAULT_OUTPUT_POLICY="ACCEPT"` : l'uid du proxy sort déjà. Le mécanisme d'exception ne sera nécessaire que si la politique sortante globale passe en deny — et il se posera alors dans la table `agent_egress`, à côté du `drop` de la zone agent.
+- **Egress du proxy : rien à ajouter à la Phase 1.** UFW est en `DEFAULT_OUTPUT_POLICY="ACCEPT"` : l'uid du proxy sort déjà. Le mécanisme d'exception ne sera nécessaire que si la politique sortante globale passe en deny — et il se posera alors dans la table `agent_egress`, à côté du `drop` de la zone agent.
 
 ### Extensions optionnelles
 
@@ -375,7 +375,7 @@ server {
 
 - [ ] **`runsc` est téléchargé depuis `.../release/latest/...` sans `checksum:`** (non épinglé, non vérifié) → épingler la version + `checksum:`. Idem pour les installeurs `uv` et NVM.
 - [ ] Images conteneurs : épingler les digests ; envisager un miroir interne + politique `cosign`.
-- [ ] Les `pip install` / `npm install` sont un point d'entrée pour un agent injecté : au minimum les journaliser, idéalement les restreindre à un miroir.
+- [ ] Les `pip install` / `npm install` sont un point d'entrée pour un agent injecté : au minimum les journaliser, idéalement les restreindre à un miroir. Concerne aussi **`npm update -g`**, que `nvm` lance **sans condition à chaque run** (constaté en Phase 1) — c'est ce qui oblige à lever le filtre d'egress pendant le provisioning.
 
 #### 🌟 Phase 7 — Observabilité & vérifications
 
@@ -384,7 +384,7 @@ server {
 - [ ] Règles auditd `execve` sur l'uid du harnais : rend visible l'exploitation d'une injection en RCE.
 - [ ] Logs des composants de la zone de confiance **et du proxy L7** → cible commune, **non inscriptible par la zone agent**. Principal artefact de détection d'exfiltration.
 - [ ] Expédition distante des logs (une VM compromise ne doit pas pouvoir effacer ses traces).
-- [ ] `make audit` qui **assère** l'état réel : règles d'egress, UFW, durcissement des unités, absence de credential hors zone de confiance.
+- [ ] `make audit` qui **assère** l'état réel : règles d'egress (et **table `agent_egress` chargée** — sans quoi un run interrompu laisse la zone agent ouverte sans le dire), UFW, durcissement des unités, absence de credential hors zone de confiance.
 - [ ] Alerting sur anomalies (nouvelle destination, upload volumineux, nouveau processus).
 
 ### Harnais
@@ -528,4 +528,4 @@ tofu -chdir=iac validate && ansible-lint
 
 ### 📌 Point de départ recommandé
 
-**Phase 0 faite** (les affirmations fausses sont corrigées). Prochaine étape : **Phase 1** — le seul contrôle réellement bloquant. Viennent ensuite **Phase 2** (inférence) puis **Phase 3** (proxy L7, dès qu'un déploiement a besoin d'un egress web déclaré). Les **Phases 4 et 5** ne sont à faire que si un cas d'usage le demande, et **Phase 8** une fois le harnais choisi et installable.
+**Phases 0 et 1 faites** (documentation corrigée ; egress de la zone agent filtré et vérifié). Prochaine étape : **Phase 2** (gateway d'inférence), puis **Phase 3** (proxy L7, dès qu'un déploiement a besoin d'un egress web déclaré). Les **Phases 4 et 5** ne sont à faire que si un cas d'usage le demande, et **Phase 8** une fois le harnais choisi et installable.
