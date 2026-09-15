@@ -1,6 +1,6 @@
 # IAC AI Agent Deployer
 
-Infrastructure as Code (IaC) solution to automatically provision and configure hardened Virtual Machines on a **Proxmox VE** cluster, tailored for hosting autonomous AI Agents (such as **Hermes**, **OpenClaw**, **Smolagents**, etc.) with rootless sandboxing via **Podman + Google gVisor (`runsc`)**, Docker/Compose compatibility layer, modern Python tooling via **`uv` (Python 3.14)**, QEMU Guest Agent integration, and LLM inference with **Ollama**, running either locally or against a remote provider — fronted by a loopback **inference gateway** that keeps provider keys and model names out of the agent's reach.
+Infrastructure as Code (IaC) solution to automatically provision and configure hardened Virtual Machines on a **Proxmox VE** cluster, tailored for hosting autonomous AI Agents (such as **Hermes**, **OpenClaw**, **Smolagents**, etc.) with rootless sandboxing via **Podman + Google gVisor (`runsc`)**, Docker/Compose compatibility layer, modern Python tooling via **`uv` (Python 3.14)**, QEMU Guest Agent integration, and LLM inference with **Ollama**, running either locally or against a remote provider — fronted by a loopback **inference gateway** that keeps provider keys and model names out of the agent's reach, and by a loopback **L7 egress proxy** whose allowlist the deployment declares.
 
 ---
 
@@ -20,7 +20,8 @@ Infrastructure as Code (IaC) solution to automatically provision and configure h
      - **Automated Security Updates**: `unattended-upgrades` with `apt-daily.timer` and automatic kernel cleanups.
      - **Ollama Security**: Explicit localhost binding (`127.0.0.1:11434`) via systemd override — this closes the **inbound** path, so the endpoint is not reachable from the network. It does not constrain **outbound** traffic: a model backed by a remote provider still generates egress, which the agent egress filter governs separately (see below).
      - **Inference Gateway (loopback, alias table)**: The harness asks for a **role alias** (`reasoning`, `execution`), never for a provider model, so its own configuration survives a provider change. The provider's port is closed to the agent zone, so the alias table cannot be bypassed.
-     - **Trust Zone**: A dedicated system user for every component holding a secret (the gateway today, the brokers later). It never executes model-produced code, and the agent cannot read its config or secrets.
+     - **L7 Egress Proxy (loopback, allowlist)**: When a deployment needs web egress, this is the agent zone's **only** way out — an explicit forward proxy whose allowlist is declared per deployment (`[.]host[:port][/path]`), refusing internal destinations. Level 1 (default) filters on destination with **no CA to distribute**; level 2 (opt-in) adds TLS interception, which buys path rules and per-request visibility at the cost of distributing an internal CA.
+     - **Trust Zone**: A dedicated system user for every component holding a secret (the gateway and the L7 proxy today, the brokers later). It never executes model-produced code, and the agent cannot read its config or secrets.
    - **Modern Python & Developer Stack**: **`uv`** standalone manager with **Python 3.14**, Node.js (via NVM), global Git & Vim configurations, essential search & monitoring tools (`ripgrep`, `fd-find`, `btop`, `nvtop`), UFW firewall, and Ollama with automated model downloading.
 
 ---
@@ -82,6 +83,10 @@ Customize global settings as needed:
 - `inference_gateway_upstream_url`: Local provider endpoint (default: `http://127.0.0.1:11434`). Used as the aliases' default `api_base`, and its port is closed to the agent zone.
 - `inference_gateway_models`: **Required** alias table — the alias the agent sees, mapped to the real provider model. The provider prefix picks the upstream endpoint (`ollama_chat/` for chat with tool calling, `ollama/` for embeddings); `api_base` defaults to the upstream URL for local models only, so a remote entry keeps its provider's own endpoint unless it declares one. A per-entry `api_key` is held by the gateway, never by the harness.
 - `inference_gateway_debug_logging`: litellm's detailed debug stream, prompts included (default: `false`). It is a debugging aid, not an audit trail.
+- `agent_egress_proxy_enabled`: Deploy the L7 egress proxy — the agent zone's only way out (default: `false`). `false` leaves the agent zone with no web egress at all, which is the socle.
+- `agent_egress_proxy_port`: Loopback port the proxy listens on (default: `8080`).
+- `agent_egress_proxy_allowlist`: **Required when enabled** — `[.]host[:port][/path]` entries; a leading dot covers subdomains, no port means 80 and 443, and a path prefix requires TLS interception. An entry `"*"` — quoted, since YAML reads a bare `*` as an alias — allows any public host: the whole internet, internal destinations excepted, at the cost of the destination control itself.
+- `agent_egress_proxy_tls_intercept`: TLS interception with an internal CA (default: `false`). Level 2 unlocks path rules and per-request visibility, and costs the CA distributed to every client stack — clients that pin a certificate break.
 - `essential_packages_extra`: Additional custom system packages to install (e.g. `["zsh", "fish"]`).
 - `system_timezone_value`: Timezone (default: `"Europe/Paris"`).
 
@@ -117,6 +122,7 @@ The playbook will:
 - Configure UFW firewall, Node.js via NVM, and **`uv` with Python 3.14**.
 - Install Ollama (bound strictly to `127.0.0.1:11434`) and pull configured models (if enabled).
 - Create the trust-zone user, then deploy the inference gateway: a loopback front door whose alias table maps the roles the agent asks for onto real provider models (if enabled).
+- Deploy the L7 egress proxy, if the deployment declared one: the agent zone's only way out, under an allowlist, with the internal CA distributed when TLS interception is on (if enabled).
 - **Lock the sandbox down last**: filter the agent user's outbound traffic by uid — loopback only, name resolution included — leaving a manipulated model with no route off the machine.
 - Reboot the machine automatically only if pending kernel updates require it.
 
@@ -161,7 +167,8 @@ ssh <harness_name>@<VM_IP_ADDRESS>
 - **gVisor by Default**: Any container invocation (`podman run`, `docker run`, `docker compose up`) automatically runs within a user-space kernel sandbox to neutralize host kernel 0-day exploits. This confines **the containers the agent launches** — not the agent.
 - **Kernel & Memory Hardening**: Core dumps disabled, kernel pointers masked (`kptr_restrict`), dmesg restricted to root, obsolete network modules blacklisted.
 - **Agent Egress Filter (nftables, per uid)**: The agent user's outbound traffic is dropped outside the loopback, **name resolution included** — a DNS query is a full outbound path, with the query name as payload. Containers the agent launches are covered whichever network mode they use. Hooked at `output priority -50`, ahead of UFW's chain, so a UFW `accept` cannot override it; UFW keeps the ingress and its own output policy. This is the control that answers a manipulated model, which the hardening above does not. When the inference gateway is deployed, the provider's own loopback port is closed to the agent zone as well, so the gateway is the only path to a model.
-- **Trust Zone & Inference Gateway (loopback)**: The harness reaches the model through a gateway bound to `127.0.0.1` and running as a **separate system user** — so the agent can neither stop it nor read its config, secrets or virtualenv. Provider keys live in a `0600` env file owned by that user and are referenced as `os.environ/...`, so they never appear in a config diff. The gateway's own files stay root-owned and group-readable: `ProtectSystem=strict` keeps them read-only for the service itself.
+- **L7 Egress Proxy (loopback)**: The agent zone has no route off the machine, so a proxy on the loopback is the *only* way out — its allowlist is a hard control, not a convention, and a stopped proxy means no egress at all rather than a direct fallback. The proxy resolves the destination itself, so the agent needs no name resolution; it refuses internal destinations (RFC1918, loopback, link-local, CGNAT) so it cannot become a path to the LAN, and it logs one line per request — destination and decision — which is the artifact Phase 7 builds on. At level 2 the private CA key stays in the trust zone home (`0700`), and only the certificate is published to the system store.
+- **Trust Zone & Inference Gateway (loopback)**: The harness reaches the model through a gateway bound to `127.0.0.1` and running as a **separate system user** — so the agent can neither stop it nor read its config, secrets or virtualenv. Provider keys live in a `0600` env file owned by that user and are referenced as `os.environ/...`, so they never appear in a config diff. The gateway's own files stay root-owned and group-readable: `ProtectSystem=strict` keeps them read-only for the service itself. The L7 proxy runs under the same user, and for the same reason: it holds the CA private key at level 2, and running a proxy under the harness uid would not work anyway — the uid filter would cut its own egress.
 
 ---
 

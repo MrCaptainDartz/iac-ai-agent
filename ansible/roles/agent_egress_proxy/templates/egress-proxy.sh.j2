@@ -1,0 +1,18 @@
+# Agent zone egress proxy (Ansible Managed)
+# Interactive sessions of the agent zone only: the admin keeps a direct egress.
+if [ "$(id -u)" = "{{ agent_egress_proxy_harness_uid.stdout }}" ]; then
+  export HTTP_PROXY="http://127.0.0.1:{{ agent_egress_proxy_port }}"
+  export HTTPS_PROXY="$HTTP_PROXY"
+  export http_proxy="$HTTP_PROXY"
+  export https_proxy="$HTTP_PROXY"
+  # The inference gateway is on the loopback too: never send it through the proxy.
+  export NO_PROXY="127.0.0.1,localhost,::1"
+  export no_proxy="$NO_PROXY"
+{% if agent_egress_proxy_tls_intercept | default(false) %}
+  # Level 2: the system bundle, so every other authority stays trusted.
+  export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+  export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
+  export CURL_CA_BUNDLE="$SSL_CERT_FILE"
+  export NODE_EXTRA_CA_CERTS={{ agent_egress_proxy_ca_store_file }}
+{% endif %}
+fi

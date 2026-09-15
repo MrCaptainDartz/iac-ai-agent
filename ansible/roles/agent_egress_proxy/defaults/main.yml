@@ -1,0 +1,23 @@
+---
+# defaults file for agent_egress_proxy
+agent_egress_proxy_enabled: false
+agent_egress_proxy_allowlist: []
+agent_egress_proxy_tls_intercept: false
+agent_egress_proxy_port: 8080
+agent_egress_proxy_service_name: egress-proxy
+agent_egress_proxy_user: "{{ trust_zone_user | default(broker_name | default('broker')) }}"
+agent_egress_proxy_home: "{{ trust_zone_home | default('/var/lib/' ~ agent_egress_proxy_user) }}"
+agent_egress_proxy_harness_name: "{{ harness_name | default('hermes') }}"
+agent_egress_proxy_version: "12.2.3"
+agent_egress_proxy_python: "3.12"
+agent_egress_proxy_memory_max: "512M"
+agent_egress_proxy_config_dir: /etc/egress-proxy
+agent_egress_proxy_root: /opt/egress-proxy
+agent_egress_proxy_venv_dir: "{{ agent_egress_proxy_root }}/venv"
+agent_egress_proxy_python_dir: "{{ agent_egress_proxy_root }}/python"
+agent_egress_proxy_allowlist_file: "{{ agent_egress_proxy_config_dir }}/allowlist"
+agent_egress_proxy_policy_file: "{{ agent_egress_proxy_config_dir }}/policy.py"
+# Level 2: mitmproxy's CA stays in the trust zone home (0700) — it holds the private key.
+agent_egress_proxy_confdir: "{{ agent_egress_proxy_home }}/.mitmproxy"
+agent_egress_proxy_ca_store_file: /usr/local/share/ca-certificates/egress-proxy-ca.crt
+agent_egress_proxy_profile_file: /etc/profile.d/egress-proxy.sh

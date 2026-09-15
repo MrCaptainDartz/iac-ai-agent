@@ -1,0 +1,34 @@
+# Agent zone egress proxy (Ansible Managed)
+[Unit]
+Description=Agent zone egress proxy ({{ agent_egress_proxy_service_name }})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ agent_egress_proxy_user }}
+Group={{ agent_egress_proxy_user }}
+# Regular mode: an explicit forward proxy, reached on the loopback.
+ExecStart={{ agent_egress_proxy_venv_dir }}/bin/mitmdump \
+  --mode regular --listen-host 127.0.0.1 --listen-port {{ agent_egress_proxy_port }} \
+  --set confdir={{ agent_egress_proxy_confdir }} --set flow_detail=0 \
+  --set allowlist_path={{ agent_egress_proxy_allowlist_file }}{% if not (agent_egress_proxy_tls_intercept | default(false)) %} --set ignore_hosts=.*{% endif %} \
+  -s {{ agent_egress_proxy_policy_file }}
+Restart=always
+RestartSec=5
+# mitmproxy 12 streams bodies and exposes no body cap: the bound is enforced here.
+MemoryMax={{ agent_egress_proxy_memory_max }}
+# Without it, its log lines sit in a block-buffered stdout: the audit trail would arrive
+# by batches and the last ones would be lost on a crash.
+Environment=PYTHONUNBUFFERED=1
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ agent_egress_proxy_home }}
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

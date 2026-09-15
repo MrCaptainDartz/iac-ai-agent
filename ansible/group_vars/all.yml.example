@@ -72,3 +72,21 @@ inference_gateway_models:
 # litellm's detailed debug stream — prompts included, hundreds of journal lines per request.
 # It is a debugging aid, not an audit trail: Phase 7 owns the real log sink.
 inference_gateway_debug_logging: false
+
+# L7 egress proxy (the adaptation brick): the agent zone's only way out, under a declared
+# allowlist. Off by default — the socle gives the agent no web egress at all.
+agent_egress_proxy_enabled: false
+agent_egress_proxy_port: 8080
+
+# [.]host[:port][/path] — a leading dot covers subdomains, no port means 80 and 443.
+# Entries combine, and a path prefix needs TLS interception (level 2).
+agent_egress_proxy_allowlist:
+  - example.com
+  - .githubusercontent.com
+#   - "*"                     # any public host on 80 and 443 (add "*:8443" for another port):
+#                             # gives up the per-destination control and resolves every name
+#   - api.example.com/v1/     # level 2 only: paths are invisible without interception
+
+# Level 2: TLS interception with an internal CA. Buys path rules and per-request visibility;
+# costs that CA in every client stack (system, Python/Node, harness) and breaks cert pinning.
+agent_egress_proxy_tls_intercept: false

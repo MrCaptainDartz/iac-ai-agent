@@ -6,3 +6,4 @@ trust_zone_home: "/var/lib/{{ trust_zone_user }}"
 # Stopped before the user is deleted: systemd would keep restarting a service running as it.
 trust_zone_dependent_units:
   - "{{ inference_gateway_service_name | default('inference-gateway') }}"
+  - "{{ agent_egress_proxy_service_name | default('egress-proxy') }}"

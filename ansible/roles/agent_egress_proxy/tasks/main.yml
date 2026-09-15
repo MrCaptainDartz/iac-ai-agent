@@ -1,0 +1,269 @@
+---
+# tasks file for agent_egress_proxy
+# L7 front door for the agent zone: the only way out, and it applies a declared policy.
+
+- name: Get the harness user UID
+  ansible.builtin.command:
+    cmd: "id -u {{ agent_egress_proxy_harness_name }}"
+  register: agent_egress_proxy_harness_uid
+  changed_when: false
+  when: agent_egress_proxy_enabled | default(false)
+
+- name: Resolve the proxy user
+  ansible.builtin.command:
+    cmd: "id -u {{ agent_egress_proxy_user }}"
+  register: agent_egress_proxy_user_check
+  changed_when: false
+  failed_when: false
+  when: agent_egress_proxy_enabled | default(false)
+
+- name: Assert the trust zone user exists
+  ansible.builtin.assert:
+    that:
+      - agent_egress_proxy_user_check.rc | default(1) == 0
+    fail_msg: >-
+      User '{{ agent_egress_proxy_user }}' does not exist. The proxy runs in the trust zone:
+      deploy it (trust_zone_enabled) or point agent_egress_proxy_user at an existing user.
+  when: agent_egress_proxy_enabled | default(false)
+
+# An enabled proxy that allows nothing is a silent outage, not a policy.
+- name: Assert the allowlist is declared
+  ansible.builtin.assert:
+    that:
+      - agent_egress_proxy_allowlist | length > 0
+    fail_msg: >-
+      agent_egress_proxy_enabled is true but agent_egress_proxy_allowlist is empty. Declare
+      '[.]host[:port][/path]' entries (or '*' for any public host), or set the flag to false.
+  when: agent_egress_proxy_enabled | default(false)
+
+- name: Validate the allowlist entries
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item is match('^(\*|\.?[A-Za-z0-9.-]+)(:[0-9]+)?(/.*)?$')
+    fail_msg: "Invalid allowlist entry '{{ item }}': expected [.]host[:port][/path], or '*' for any host."
+  loop: "{{ agent_egress_proxy_allowlist }}"
+  loop_control:
+    label: "{{ item }}"
+  when: agent_egress_proxy_enabled | default(false)
+
+# Without interception the path is never visible: the rule would be silently ineffective.
+- name: Assert that path rules come with TLS interception
+  ansible.builtin.assert:
+    that:
+      - agent_egress_proxy_allowlist | select('search', '/') | list | length == 0
+    fail_msg: >-
+      The allowlist declares a path rule ({{ agent_egress_proxy_allowlist | select('search', '/')
+      | list | join(', ') }}) while agent_egress_proxy_tls_intercept is false. Paths are only
+      visible once TLS is terminated: set the flag, or drop the path.
+  when:
+    - agent_egress_proxy_enabled | default(false)
+    - not (agent_egress_proxy_tls_intercept | default(false))
+
+- name: Create the proxy configuration directory
+  ansible.builtin.file:
+    path: "{{ agent_egress_proxy_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ agent_egress_proxy_user }}"
+    mode: '0750'
+  when: agent_egress_proxy_enabled | default(false)
+
+- name: Create the proxy virtualenv
+  ansible.builtin.command:
+    cmd: "sh -c 'umask 027 && uv venv --python {{ agent_egress_proxy_python }} {{ agent_egress_proxy_venv_dir }}'"
+    creates: "{{ agent_egress_proxy_venv_dir }}/bin/python"
+  environment:
+    PATH: "/usr/local/bin:{{ ansible_facts['env']['PATH'] | default('/usr/bin:/bin') }}"
+    # Otherwise uv installs the interpreter under /root, out of the proxy user's reach.
+    UV_PYTHON_INSTALL_DIR: "{{ agent_egress_proxy_python_dir }}"
+  when: agent_egress_proxy_enabled | default(false)
+
+- name: Read the installed proxy version
+  ansible.builtin.slurp:
+    src: "{{ agent_egress_proxy_venv_dir }}/.version"
+  register: agent_egress_proxy_version_stamp
+  failed_when: false
+  when: agent_egress_proxy_enabled | default(false)
+
+- name: Install the pinned proxy version
+  ansible.builtin.command:
+    cmd: "sh -c 'umask 027 && uv pip install --python {{ agent_egress_proxy_venv_dir }}/bin/python \"mitmproxy=={{ agent_egress_proxy_version }}\"'"
+  environment:
+    PATH: "/usr/local/bin:{{ ansible_facts['env']['PATH'] | default('/usr/bin:/bin') }}"
+  when:
+    - agent_egress_proxy_enabled | default(false)
+    - agent_egress_proxy_version_stamp.content | default('') | b64decode | trim != agent_egress_proxy_version
+  changed_when: true
+  notify: Restart egress proxy
+
+- name: Record the installed proxy version
+  ansible.builtin.copy:
+    content: "{{ agent_egress_proxy_version }}\n"
+    dest: "{{ agent_egress_proxy_venv_dir }}/.version"
+    owner: root
+    group: root
+    mode: '0644'
+  when:
+    - agent_egress_proxy_enabled | default(false)
+    - agent_egress_proxy_version_stamp.content | default('') | b64decode | trim != agent_egress_proxy_version
+
+# Group read-only: 0750/0640 from the umask, so the trust zone reads but never writes.
+- name: Give the proxy user read access to its virtualenv
+  ansible.builtin.file:
+    path: "{{ agent_egress_proxy_root }}"
+    state: directory
+    owner: root
+    group: "{{ agent_egress_proxy_user }}"
+    recurse: true
+  when: agent_egress_proxy_enabled | default(false)
+
+- name: Deploy the egress allowlist
+  ansible.builtin.template:
+    src: allowlist.j2
+    dest: "{{ agent_egress_proxy_allowlist_file }}"
+    owner: root
+    group: "{{ agent_egress_proxy_user }}"
+    mode: '0640'
+  when: agent_egress_proxy_enabled | default(false)
+  notify: Restart egress proxy
+
+# Not a template: every deployment value reaches it through --set.
+- name: Deploy the egress policy
+  ansible.builtin.copy:
+    src: policy.py
+    dest: "{{ agent_egress_proxy_policy_file }}"
+    owner: root
+    group: "{{ agent_egress_proxy_user }}"
+    mode: '0640'
+  when: agent_egress_proxy_enabled | default(false)
+  notify: Restart egress proxy
+
+- name: Deploy the proxy systemd unit
+  ansible.builtin.template:
+    src: egress-proxy.service.j2
+    dest: "/etc/systemd/system/{{ agent_egress_proxy_service_name }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+  when: agent_egress_proxy_enabled | default(false)
+  notify: Restart egress proxy
+
+- name: Deploy the agent zone proxy environment
+  ansible.builtin.template:
+    src: egress-proxy.sh.j2
+    dest: "{{ agent_egress_proxy_profile_file }}"
+    owner: root
+    group: root
+    mode: '0644'
+  when: agent_egress_proxy_enabled | default(false)
+
+- name: Enable the proxy service
+  ansible.builtin.systemd_service:
+    name: "{{ agent_egress_proxy_service_name }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  when: agent_egress_proxy_enabled | default(false)
+
+- name: Flush handlers so the proxy is checked as configured
+  ansible.builtin.meta: flush_handlers
+  when: agent_egress_proxy_enabled | default(false)
+
+# The effect, not the unit state: a service can report "active" and serve nothing.
+- name: Check that the proxy answers on its loopback port
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ agent_egress_proxy_port }}"
+    state: started
+    timeout: 60
+  when: agent_egress_proxy_enabled | default(false)
+
+# --- level 2: the CA, published to the trust store the clients read -----------------
+
+# Generated by the service at startup, in its own confdir: there is nothing to intercept without it.
+- name: Check that mitmproxy generated its certificate authority
+  ansible.builtin.stat:
+    path: "{{ agent_egress_proxy_confdir }}/mitmproxy-ca-cert.pem"
+  register: agent_egress_proxy_ca
+  when:
+    - agent_egress_proxy_enabled | default(false)
+    - agent_egress_proxy_tls_intercept | default(false)
+
+- name: Assert that the certificate authority exists
+  ansible.builtin.assert:
+    that:
+      - agent_egress_proxy_ca.stat.exists
+    fail_msg: >-
+      No certificate authority in {{ agent_egress_proxy_confdir }}: TLS interception would fail
+      for every client. Check 'journalctl -u {{ agent_egress_proxy_service_name }}'.
+  when:
+    - agent_egress_proxy_enabled | default(false)
+    - agent_egress_proxy_tls_intercept | default(false)
+
+- name: Publish the certificate authority to the system trust store
+  ansible.builtin.copy:
+    src: "{{ agent_egress_proxy_confdir }}/mitmproxy-ca-cert.pem"
+    dest: "{{ agent_egress_proxy_ca_store_file }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0644'
+  when:
+    - agent_egress_proxy_enabled | default(false)
+    - agent_egress_proxy_tls_intercept | default(false)
+  notify: Refresh the system trust store
+
+# Level 1 needs no CA, and a disabled proxy must not leave one behind.
+- name: Withdraw the certificate authority from the system trust store
+  ansible.builtin.file:
+    path: "{{ agent_egress_proxy_ca_store_file }}"
+    state: absent
+  when: not (agent_egress_proxy_enabled | default(false) and (agent_egress_proxy_tls_intercept | default(false)))
+  notify: Rebuild the system trust store
+
+# --- disabled: restore the previous state, service and files included --------------
+
+- name: Stop and disable the proxy service
+  ansible.builtin.systemd_service:
+    name: "{{ agent_egress_proxy_service_name }}"
+    state: stopped
+    enabled: false
+  failed_when: false
+  when: not (agent_egress_proxy_enabled | default(false))
+
+- name: Remove the proxy systemd unit
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ agent_egress_proxy_service_name }}.service"
+    state: absent
+  when: not (agent_egress_proxy_enabled | default(false))
+
+- name: Remove the agent zone proxy environment
+  ansible.builtin.file:
+    path: "{{ agent_egress_proxy_profile_file }}"
+    state: absent
+  when: not (agent_egress_proxy_enabled | default(false))
+
+- name: Remove the proxy configuration directory
+  ansible.builtin.file:
+    path: "{{ agent_egress_proxy_config_dir }}"
+    state: absent
+  when: not (agent_egress_proxy_enabled | default(false))
+
+- name: Remove the proxy virtualenv and its interpreter
+  ansible.builtin.file:
+    path: "{{ agent_egress_proxy_root }}"
+    state: absent
+  when: not (agent_egress_proxy_enabled | default(false))
+
+# The private key does not outlive the component that used it.
+- name: Remove the certificate authority store
+  ansible.builtin.file:
+    path: "{{ agent_egress_proxy_confdir }}"
+    state: absent
+  when: not (agent_egress_proxy_enabled | default(false))
+
+- name: Reload the systemd manager configuration
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: not (agent_egress_proxy_enabled | default(false))

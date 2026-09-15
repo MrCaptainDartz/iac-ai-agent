@@ -42,3 +42,7 @@ terraform.rc
 # Ansible
 ansible/inventory/inventory.yml
 ansible/group_vars/all.yml
+
+# Python bytecode (the L7 egress proxy ships an addon)
+__pycache__/
+*.pyc

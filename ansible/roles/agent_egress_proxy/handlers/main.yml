@@ -1,0 +1,19 @@
+---
+# handlers file for agent_egress_proxy
+- name: Restart egress proxy
+  ansible.builtin.systemd_service:
+    name: "{{ agent_egress_proxy_service_name }}"
+    state: restarted
+    daemon_reload: true
+
+# Notified only on a real change, so reporting `changed` here is truthful.
+- name: Refresh the system trust store
+  ansible.builtin.command:
+    cmd: update-ca-certificates
+  changed_when: true
+
+# `--fresh` rebuilds every link: a plain run leaves the withdrawn CA's links dangling.
+- name: Rebuild the system trust store
+  ansible.builtin.command:
+    cmd: update-ca-certificates --fresh
+  changed_when: true

@@ -1,0 +1,5 @@
+# Agent zone egress allowlist (Ansible Managed)
+# Entries: [.]host[:port][/path], or * for any public host — dot = subdomains, no port = 80 and 443, path = level 2.
+{% for entry in agent_egress_proxy_allowlist %}
+{{ entry }}
+{% endfor %}
