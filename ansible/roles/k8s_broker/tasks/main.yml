@@ -1,0 +1,197 @@
+---
+# tasks file for k8s_broker
+# Read-only cluster access for the agent zone: the ServiceAccount token stays in the trust zone.
+
+- name: Resolve the broker user
+  ansible.builtin.command:
+    cmd: "id -u {{ k8s_broker_user }}"
+  register: k8s_broker_user_check
+  changed_when: false
+  failed_when: false
+  when: k8s_broker_enabled | default(false)
+
+- name: Assert the trust zone user exists
+  ansible.builtin.assert:
+    that:
+      - k8s_broker_user_check.rc | default(1) == 0
+    fail_msg: >-
+      User '{{ k8s_broker_user }}' does not exist. The broker runs in the trust zone:
+      deploy it (trust_zone_enabled) or point k8s_broker_user at an existing user.
+  when: k8s_broker_enabled | default(false)
+
+# A node's kubeconfig is cluster-admin.
+- name: Check whether this VM runs a cluster node
+  ansible.builtin.stat:
+    path: /etc/rancher/k3s
+  register: k8s_broker_node_check
+  when: k8s_broker_enabled | default(false)
+
+- name: Assert that this VM is not a cluster node
+  ansible.builtin.assert:
+    that:
+      - not k8s_broker_node_check.stat.exists
+    fail_msg: >-
+      /etc/rancher/k3s exists: this VM is a k3s node. Its own kubeconfig is cluster-admin, and a
+      broker fed with it would hand the agent the cluster. Point the broker at a remote cluster.
+  when: k8s_broker_enabled | default(false)
+
+- name: Assert that the broker kubeconfig is declared
+  ansible.builtin.assert:
+    that:
+      - k8s_broker_kubeconfig_src | length > 0
+    fail_msg: >-
+      k8s_broker_enabled is true but k8s_broker_kubeconfig_src is empty. Point it at the
+      ServiceAccount kubeconfig (see README), or set the flag to false.
+  when: k8s_broker_enabled | default(false)
+
+# The pinned checksum is an amd64 build.
+- name: Assert that the architecture matches the pinned binary
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.architecture == 'x86_64'
+    fail_msg: >-
+      k8s_broker_kubectl_version is pinned for amd64, checksum included, and this VM reports
+      {{ ansible_facts.architecture }}. Re-pin a matching build and checksum, or use an amd64 VM.
+  when: k8s_broker_enabled | default(false)
+
+- name: Create the broker installation directory
+  ansible.builtin.file:
+    path: "{{ k8s_broker_bin_dir }}"
+    state: directory
+    owner: root
+    group: "{{ k8s_broker_user }}"
+    mode: '0750'
+  when: k8s_broker_enabled | default(false)
+
+# No stat guard: get_url compares the checksum.
+- name: Install the pinned kubectl binary
+  ansible.builtin.get_url:
+    url: "https://dl.k8s.io/release/{{ k8s_broker_kubectl_version }}/bin/linux/amd64/kubectl"
+    dest: "{{ k8s_broker_kubectl }}"
+    checksum: "sha256:{{ k8s_broker_kubectl_sha256 }}"
+    owner: root
+    group: "{{ k8s_broker_user }}"
+    mode: '0750'
+  when: k8s_broker_enabled | default(false)
+
+- name: Create the broker kubeconfig directory
+  ansible.builtin.file:
+    path: "{{ k8s_broker_kubeconfig_dir }}"
+    state: directory
+    owner: root
+    group: "{{ k8s_broker_user }}"
+    mode: '0750'
+  when: k8s_broker_enabled | default(false)
+
+# kubectl reads this file itself, so the group needs read access.
+- name: Deploy the broker kubeconfig
+  ansible.builtin.copy:
+    src: "{{ k8s_broker_kubeconfig_src }}"
+    dest: "{{ k8s_broker_kubeconfig }}"
+    owner: root
+    group: "{{ k8s_broker_user }}"
+    mode: '0640'
+  when: k8s_broker_enabled | default(false)
+  notify: Restart k8s broker
+  no_log: true
+
+- name: Deploy the broker systemd unit
+  ansible.builtin.template:
+    src: k8s-broker.service.j2
+    dest: "/etc/systemd/system/{{ k8s_broker_service_name }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+  when: k8s_broker_enabled | default(false)
+  notify: Restart k8s broker
+
+- name: Enable the broker service
+  ansible.builtin.systemd_service:
+    name: "{{ k8s_broker_service_name }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  when: k8s_broker_enabled | default(false)
+
+- name: Flush handlers so the broker is checked as configured
+  ansible.builtin.meta: flush_handlers
+  when: k8s_broker_enabled | default(false)
+
+- name: Check that the broker reaches the API server
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ k8s_broker_port }}/api"
+    # Never through a proxy: the probe is loopback.
+    use_proxy: false
+    return_content: true
+  register: k8s_broker_probe
+  until: k8s_broker_probe.status | default(0) == 200
+  retries: 30
+  delay: 2
+  when: k8s_broker_enabled | default(false)
+
+- name: Assert that the ServiceAccount credential works
+  ansible.builtin.assert:
+    that:
+      - k8s_broker_probe.json.versions | default([]) | length > 0
+    fail_msg: >-
+      The broker answered without the API server's version list: check the kubeconfig and
+      'journalctl -u {{ k8s_broker_service_name }}'.
+  when: k8s_broker_enabled | default(false)
+
+- name: Create the agent zone kubeconfig directory
+  ansible.builtin.file:
+    path: "{{ k8s_broker_agent_kubeconfig | dirname }}"
+    state: directory
+    owner: "{{ k8s_broker_harness_name }}"
+    group: "{{ k8s_broker_harness_name }}"
+    mode: '0700'
+  when: k8s_broker_enabled | default(false)
+
+- name: Deploy the agent zone kubeconfig
+  ansible.builtin.template:
+    src: harness-kubeconfig.j2
+    dest: "{{ k8s_broker_agent_kubeconfig }}"
+    owner: "{{ k8s_broker_harness_name }}"
+    group: "{{ k8s_broker_harness_name }}"
+    mode: '0600'
+  when: k8s_broker_enabled | default(false)
+
+# --- disabled: restore the previous state, service and files included --------------
+
+- name: Stop and disable the broker service
+  ansible.builtin.systemd_service:
+    name: "{{ k8s_broker_service_name }}"
+    state: stopped
+    enabled: false
+  failed_when: false
+  when: not (k8s_broker_enabled | default(false))
+
+- name: Remove the broker systemd unit
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ k8s_broker_service_name }}.service"
+    state: absent
+  when: not (k8s_broker_enabled | default(false))
+
+- name: Remove the agent zone kubeconfig
+  ansible.builtin.file:
+    path: "{{ k8s_broker_agent_kubeconfig }}"
+    state: absent
+  when: not (k8s_broker_enabled | default(false))
+
+# The token does not outlive the component.
+- name: Remove the broker kubeconfig directory
+  ansible.builtin.file:
+    path: "{{ k8s_broker_kubeconfig_dir }}"
+    state: absent
+  when: not (k8s_broker_enabled | default(false))
+
+- name: Remove the broker binary and its directory
+  ansible.builtin.file:
+    path: "{{ k8s_broker_root }}"
+    state: absent
+  when: not (k8s_broker_enabled | default(false))
+
+- name: Reload the systemd manager configuration
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: not (k8s_broker_enabled | default(false))

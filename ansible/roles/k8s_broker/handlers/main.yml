@@ -1,0 +1,7 @@
+---
+# handlers file for k8s_broker
+- name: Restart k8s broker
+  ansible.builtin.systemd_service:
+    name: "{{ k8s_broker_service_name }}"
+    state: restarted
+    daemon_reload: true

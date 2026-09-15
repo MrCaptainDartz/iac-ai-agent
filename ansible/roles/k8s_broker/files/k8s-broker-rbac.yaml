@@ -1,0 +1,91 @@
+# Cluster-side half of the k8s_broker role: apply it, then give the role the kubeconfig (README).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sre-agent
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sre-readonly
+  namespace: sre-agent
+---
+# Explicit rather than the built-in 'view', whose contents move between releases.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sre-readonly
+rules:
+  - apiGroups: [""]
+    resources:
+      - pods
+      - services
+      - endpoints
+      - configmaps
+      - nodes
+      - namespaces
+      - events
+      - persistentvolumeclaims
+      - persistentvolumes
+      - limitranges
+      - resourcequotas
+      - serviceaccounts
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps", "batch", "networking.k8s.io", "apiextensions.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups:
+      - discovery.k8s.io
+      - autoscaling
+      - policy
+      - storage.k8s.io
+      - coordination.k8s.io
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups:
+      - node.k8s.io
+      - scheduling.k8s.io
+      - events.k8s.io
+      - flowcontrol.apiserver.k8s.io
+      - apiregistration.k8s.io
+      - rbac.authorization.k8s.io
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Paths in an external store and store status conditions — what names a stalled sync.
+  # Escape hatch: a store's provider config can inline credentials (vault.headers, fake.data).
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets", "secretstores", "clustersecretstores"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list"]
+  # Custom resources go here by name, never through an apiGroups wildcard:
+  #   - apiGroups: ["traefik.io", "cert-manager.io", "acme.cert-manager.io", "monitoring.coreos.com", "argoproj.io"]
+  #     resources: ["*"]
+  #     verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sre-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sre-readonly
+subjects:
+  - kind: ServiceAccount
+    name: sre-readonly
+    namespace: sre-agent
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sre-readonly-token
+  namespace: sre-agent
+  annotations:
+    kubernetes.io/service-account.name: sre-readonly
+type: kubernetes.io/service-account-token

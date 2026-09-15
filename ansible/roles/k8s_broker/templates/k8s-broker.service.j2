@@ -1,0 +1,26 @@
+# Kubernetes broker (Ansible Managed)
+[Unit]
+Description=Kubernetes broker ({{ k8s_broker_service_name }})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ k8s_broker_user }}
+Group={{ k8s_broker_user }}
+Environment=HOME={{ k8s_broker_home }}
+ExecStart={{ k8s_broker_kubectl }} proxy --address=127.0.0.1 --port={{ k8s_broker_port }} --kubeconfig={{ k8s_broker_kubeconfig }} --reject-methods='POST,PUT,PATCH,DELETE' --reject-paths='^/api/.*/(pods|services|nodes)/.*/(exec|attach|portforward|proxy),^/api/.*/secrets,^/apis/.*/secrets'
+Restart=always
+RestartSec=5
+MemoryMax={{ k8s_broker_memory_max }}
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ k8s_broker_home }}
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

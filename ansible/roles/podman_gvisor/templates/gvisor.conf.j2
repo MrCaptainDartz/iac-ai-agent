@@ -7,3 +7,7 @@ compose_warning_logs = false
 runsc = [
     "/usr/local/bin/runsc-wrapper"
 ]
+{% if podman_gvisor_netns | default('') | length > 0 %}
+[containers]
+netns = "{{ podman_gvisor_netns }}"
+{% endif %}

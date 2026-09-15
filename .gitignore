@@ -43,6 +43,10 @@ terraform.rc
 ansible/inventory/inventory.yml
 ansible/group_vars/all.yml
 
+# Kubernetes broker: the ServiceAccount kubeconfig holds a token
+ansible/*.kubeconfig
+ansible/files/*.kubeconfig
+
 # Python bytecode (the L7 egress proxy ships an addon)
 __pycache__/
 *.pyc

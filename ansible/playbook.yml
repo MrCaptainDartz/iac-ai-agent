@@ -30,6 +30,18 @@
           the destinations (or set agent_egress_proxy_enabled: false) before running the play.
       when: agent_egress_proxy_enabled | default(false)
 
+    - name: Pre-flight check that the Kubernetes broker has a kubeconfig
+      ansible.builtin.assert:
+        that:
+          - k8s_broker_kubeconfig_src | default('') | length > 0
+          - >-
+            (lookup('ansible.builtin.file', k8s_broker_kubeconfig_src | default(''), errors='ignore')
+             | default('', true)) is search('server:')
+        fail_msg: >-
+          k8s_broker_enabled is true but k8s_broker_kubeconfig_src is empty, unreadable, or does
+          not hold a kubeconfig. Generate the ServiceAccount's kubeconfig (README) before the play.
+      when: k8s_broker_enabled | default(false)
+
     # Provisioning installs tooling as the harness user (nvm, npm) and needs the network this
     # filter removes: lifted for the run, re-applied last. A run failing before that leaves it open.
     - name: Check whether the agent egress filter is currently loaded
@@ -57,10 +69,11 @@
     - uv
     - role: ollama
       when: ollama_enabled | default(true)
-    # Trust zone first: the gateway and the L7 proxy run under it, never under the harness uid.
+    # Trust zone first: every component holding a secret runs under it, never under the harness uid.
     - trust_zone
     - inference_gateway
     - agent_egress_proxy
+    - k8s_broker
     # Last: locks the sandbox down and closes the pre_tasks window.
     - agent_egress
   post_tasks:

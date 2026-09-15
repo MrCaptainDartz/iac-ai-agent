@@ -15,6 +15,14 @@ ssh_allow_tcp_forwarding: false # Set to true if SSH port forwarding/tunneling i
 gvisor_enabled: true
 gvisor_default: true # When true, gVisor (runsc) is used as the default OCI runtime for all containers
 
+# Give every container gVisor's host stack instead of its netstack (default: false).
+# Required for `--network=host` under rootless Podman unless passed per container (`--runtime-flag network=host`).
+podman_gvisor_hostinet: false
+
+# Default network mode for EVERY container, in Podman's vocabulary ("" leaves it to Podman).
+# Not required if the harness container itself is launched with `--network=host`.
+podman_gvisor_netns: ""
+
 # Egress control: filter the agent zone's outbound traffic by uid — loopback only,
 # name resolution included. Set to false to leave the outbound path unrestricted.
 agent_egress_filter_enabled: true
@@ -90,3 +98,10 @@ agent_egress_proxy_allowlist:
 # Level 2: TLS interception with an internal CA. Buys path rules and per-request visibility;
 # costs that CA in every client stack (system, Python/Node, harness) and breaks cert pinning.
 agent_egress_proxy_tls_intercept: false
+
+# Kubernetes broker (read-only): the agent zone reaches a cluster through a loopback endpoint held by. the trust zone, so the token never enters the agent zone.
+k8s_broker_enabled: false
+k8s_broker_port: 8001
+
+# The ServiceAccount kubeconfig: kept out of the repository, so it is a file and not a variable.
+k8s_broker_kubeconfig_src: "{{ inventory_dir }}/../files/k8s-broker.kubeconfig"

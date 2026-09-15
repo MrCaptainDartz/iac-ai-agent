@@ -51,6 +51,8 @@ C'est cette règle qui rend le broker optionnel : s'il n'y a aucun secret à dé
 - **Une seule VM.** La frontière interne entre les deux zones est faible (même noyau). Acceptable tant qu'aucun secret d'infrastructure n'entre en jeu.
 - **Jeton de forge injecté par proxy.** Jamais dans l'espace d'adressage du harnais, jamais dans son environnement. Le bornage vient de la protection de branche, pas du proxy.
 
+- **Où vit un credential : chez qui peut le frapper.** Un jeton de ServiceAccount est frappé par le cluster — un coffre ne peut en être que le second domicile, et le livrer supposerait que la VM lise un Secret k8s, donc de percer le contrôle que le broker est censé fermer (Phase 4). Un mot de passe de base ou une clé d'API, c'est le déploiement qui les écrit : le coffre en est la source, et ESO les matérialise dans le cluster. Entre les deux, ce qui est frappé **une fois puis illisible** (un PAT de forge) : la seule copie restante est celle du déploiement, donc le coffre y est à sa place (Phase 5). La consommation est un axe séparé : le domicile se choisit à la source, la livraison dépend du consommateur.
+
 ---
 
 ## 🏗️ 1. État déployé
@@ -78,7 +80,7 @@ Le socle d'isolation multi-couches est en place. **« Déployé » ne veut pas d
 │  │   produit par le modèle.                                               │  │
 │  │   • Gateway d'inférence  → provider, clé détenue (fait, Ph. 2)         │  │
 │  │   • Proxy egress L7      → internet, allowlist (fait, Ph. 3)           │  │
-│  │   • Broker Kubernetes    → kube-apiserver, jeton RO injecté (Phase 4)  │  │
+│  │   • Broker Kubernetes    → kube-apiserver, jeton RO (fait, Ph. 4)      │  │
 │  │   • Broker git           → forge, token injecté (Phase 5)              │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -97,6 +99,7 @@ Le proxy L7 est la **brique d'adaptation** : elle permet de déclarer une politi
 7. **Egress de la zone agent** : filtré par uid (table nftables `agent_egress`, chargée par `agent-egress.service`) — loopback seul, résolution de noms comprise, conteneurs couverts. Appliqué en dernier rôle du play ; voir Phase 1 pour l'ordre et la fenêtre assumée.
 8. **Gateway d'inférence** (`inference-gateway.service`) : porte d'entrée loopback portée par la **zone de confiance** (`broker`), table d'alias obligatoire — l'agent nomme un rôle, jamais un modèle du provider — et clé du provider détenue par le gateway. Le port amont du provider est fermé à la zone agent, donc le gateway est le seul chemin vers un modèle.
 9. **Proxy egress L7** (`egress-proxy.service`, `agent_egress_proxy_enabled`) : la **seule** sortie de la zone agent vers le web, allowlist déclarée par le déploiement, destinations internes refusées, une ligne de journal par requête. Le niveau 1 ne demande aucune CA ; le niveau 2 (interception TLS, opt-in) ajoute les chemins et l'inspection au prix de la distribution d'une CA interne.
+10. **Broker Kubernetes** (`k8s-broker.service`, `k8s_broker_enabled`) : le **seul** chemin de la zone agent vers un cluster, sous forme de `kubectl proxy` loopback porté par la zone de confiance, alimenté par un kubeconfig de ServiceAccount en lecture seule qui n'entre jamais dans la zone agent. L'agent reçoit une adresse (`127.0.0.1:8001`) et un `token: ignore` ; les méthodes d'écriture et les chemins `exec`/`attach`/`portforward`/`secrets` sont refusés par le proxy, et le jeton n'a aucun verbe d'écriture.
 
 ---
 
@@ -160,7 +163,10 @@ agent_egress_proxy_allowlist: []
 agent_egress_proxy_tls_intercept: false # niveau 2 : interception TLS (CA interne, cert pinning cassé)
 
 # --- Extensions optionnelles ---
-k8s_broker_enabled: false
+k8s_broker_enabled: false           # broker Kubernetes en lecture seule, porté par la zone de confiance
+k8s_broker_port: 8001
+# Kubeconfig du ServiceAccount : un secret, donc un fichier hors dépôt, pas une variable.
+k8s_broker_kubeconfig_src: "{{ inventory_dir }}/../files/k8s-broker.kubeconfig"
 git_broker_enabled: false
 
 # --- Harnais (Phase 8) : installation (provider) puis sécurisation ---
@@ -368,7 +374,7 @@ Implémentation : **mitmproxy 12.2.3** (`mitmdump`, mode *regular*), `egress-pro
 3. **Point de panne unique** pour l'egress web : `Restart=always`, et l'absence de repli est la propriété recherchée, pas un défaut.
 4. **`getaddrinfo` bloque la boucle d'événements** le temps d'une résolution, et **le cache par hôte croît avec les hôtes autorisés** : négligeable en allowlist stricte, ~1-2 Mo pour 10 000 domaines sous `*`, et borné par `MemoryMax`. À revoir si mitmproxy expose un jour un hook de résolution.
 5. **La politique est déclarative** : l'agent peut atteindre tout ce que l'allowlist déclare. Un domaine autorisé reste un canal d'exfiltration — c'est la Phase 7 (alerte sur volume) qui porte cette limite, pas le proxy.
-6. **Un conteneur n'atteint le proxy qu'en `--network=host`** : avec son propre netns, `127.0.0.1:8080` est *son* loopback, et le chemin vers l'hôte est un egress non-loopback donc filtré. Le proxy sert le harnais nu ; un conteneur qui a besoin du web passe par `--network=host`.
+6. **Un conteneur n'atteint le proxy qu'en `--network=host` — et sous `runsc`, ce flag seul ne suffit pas** (mesuré en Phase 4, détail au tableau des mesures de cette phase) : il faut **deux** flags indépendants, celui de Podman (partager le netns de l'hôte) *et* celui de runsc (`--runtime-flag network=host`, hostinet au lieu du netstack). Sans le second, le sandbox se retrouve **sans aucune interface** et `127.0.0.1` n'est joignable par personne. Avec son propre netns, `127.0.0.1:8080` est de toute façon *son* loopback. Le proxy sert le harnais nu ; un conteneur qui a besoin du web passe par les deux flags.
 
 **Ce qui reste dehors, et pourquoi :**
 
@@ -380,20 +386,26 @@ Implémentation : **mitmproxy 12.2.3** (`mitmdump`, mode *regular*), `egress-pro
 
 > Chaque extension ajoute un broker à la zone de confiance. **Aucune n'est requise** : un agent purement conversationnel n'a besoin ni de l'une ni de l'autre.
 
-#### 🌟 Phase 4 — Broker Kubernetes (lecture seule)
+#### ✅ Phase 4 — Broker Kubernetes (lecture seule) *(faite)*
 
 Cas d'usage : agent SRE. **Pas de MITM, pas de CA interne** — le harnais parle en HTTP clair à un port loopback, le broker fait le TLS en amont.
 
-- [ ] Vérifier que la VM agent **n'est pas un nœud k3s** (le kubeconfig du serveur est cluster-admin ; les identifiants de nœud sont très privilégiés).
-- [ ] ServiceAccount + ClusterRole **explicite** (ne pas utiliser le `view` intégré, contenu variable selon les versions) :
+Implémentation : **`kubectl proxy`** (`k8s-broker.service`, `k8s_broker_enabled`), sous l'utilisateur de la zone de confiance. Aucun code à écrire : il fait le TLS amont, suit les `watch` (flux longs, qu'un reverse proxy naïf bufferiserait) et porte déjà le filtre de requêtes. Comme le proxy L7 en Phase 3, c'est l'outil existant plutôt qu'une réimplémentation.
+
+**Le RBAC vit sur le cluster, pas dans ce dépôt.** Le projet ne possède pas le cluster et n'a aucune raison de laisser un kubeconfig d'admin sur le poste : le rôle **livre** le manifeste (`roles/k8s_broker/files/k8s-broker-rbac.yaml` — Namespace, ServiceAccount, ClusterRole, binding, Secret de jeton), le déploiement le pose, et le README donne les commandes qui produisent le kubeconfig que le play consomme.
+
+- [x] **La VM agent n'est pas un nœud k3s** — vérifié (aucun binaire kube, aucun `/etc/rancher`, aucune unité), **et le rôle l'assère** : le kubeconfig d'un serveur k3s est cluster-admin, un broker alimenté avec lui livrerait le cluster à l'agent.
+- [x] ServiceAccount + ClusterRole **explicite** (jamais le `view` intégré, dont le contenu bouge entre versions) :
 
 ```yaml
 kind: ClusterRole
-metadata: { name: agent-diagnostics }
+metadata: { name: sre-readonly }
 rules:
+  # The archetypal SRE questions: why is this pod pending, why is this volume unbound.
   - apiGroups: [""]
-    resources: ["pods","services","endpoints","configmaps","nodes",
-                "namespaces","events","persistentvolumeclaims"]
+    resources: ["pods","services","endpoints","configmaps","nodes","namespaces","events",
+                "persistentvolumeclaims","persistentvolumes","limitranges","resourcequotas",
+                "serviceaccounts"]
     verbs: ["get","list","watch"]
   - apiGroups: [""]
     resources: ["pods/log"]
@@ -401,26 +413,92 @@ rules:
   - apiGroups: ["apps","batch","networking.k8s.io","apiextensions.k8s.io"]
     resources: ["*"]
     verbs: ["get","list","watch"]
+  - apiGroups: ["discovery.k8s.io","autoscaling","policy","storage.k8s.io","coordination.k8s.io"]
+    resources: ["*"]
+    verbs: ["get","list","watch"]
+  # Store paths, never values. The stores and generators are deliberately absent.
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["get","list","watch"]
   - apiGroups: ["metrics.k8s.io"]
     resources: ["*"]
     verbs: ["get","list"]
 # NI secrets, NI pods/exec|portforward|attach, NI impersonate, aucun write.
 ```
 
-- [ ] Vérifier : `kubectl auth can-i --list --as=system:serviceaccount:<ns>:<sa>`.
-- [ ] Jeton : durée de vie configurable (longue en homelab, ou 15 min + timer + reload du proxy).
-- [ ] Kubeconfig du broker en `0600`, **illisible par la zone agent**.
-- [ ] Unité systemd `kubectl proxy` durcie :
+  Livré tel quel dans `roles/k8s_broker/files/k8s-broker-rbac.yaml` (Namespace, binding et Secret de jeton compris) : à poser par l'ansible de cluster du déploiement.
+
+- [x] Vérification côté cluster : `kubectl auth can-i --list --as=system:serviceaccount:<ns>:<sa>` — le seul contrôle qui dise ce que le jeton fait réellement (README §4). Cette sortie contient aussi un verbe **`create`** sur les trois `selfsubject*reviews` : c'est `system:basic-user`, lié à tout le monde par défaut, et ça ne change aucun état — ça répond à « ai-je le droit de… ». À ne pas confondre avec un droit d'écriture en lisant la liste.
+- [x] **Jeton long** (Secret `service-account-token`, créé à la main depuis 1.24) : la rotation, c'est régénérer le kubeconfig et relancer le play. Le « 15 min + timer + reload » envisagé ici est une **impasse** — pour frapper un jeton il faut un credential, et le seul que le broker accepterait de détenir *est* le jeton : un jeton court ne ferait que déplacer le secret d'amorçage d'un cran.
+- [x] Kubeconfig du broker en **`0640 root:{{ user }}`** dans le home de la zone de confiance (0700), **illisible par la zone agent**. Le `0600` prévu ici ne marchait pas : contrairement à `EnvironmentFile`, lu par systemd **en root avant** la baisse de privilèges, c'est `kubectl` qui lit ce fichier.
+- [x] Unité systemd `kubectl proxy` durcie, `--address=127.0.0.1` et `MemoryMax=` :
 
 ```bash
-kubectl proxy --port=<port> --address=127.0.0.1 \
+kubectl proxy --port=<port> --address=127.0.0.1 --kubeconfig=<kubeconfig> \
   --reject-methods='POST,PUT,PATCH,DELETE' \
-  --reject-paths='^/api/.*/secrets,^/apis/.*/secrets,^/api/.*/pods/.*/(exec|attach|portforward)'
+  --reject-paths='^/api/.*/(pods|services|nodes)/.*/(exec|attach|portforward|proxy),^/api/.*/secrets,^/apis/.*/secrets'
+Restart=always
+MemoryMax=<borne>
 ```
 
-  `--reject-paths` **remplace** les motifs par défaut (qui rejettent déjà `exec`/`attach`) → les inclure explicitement. Si un `403` sur le `Host` apparaît, ajouter `--accept-hosts='.*'` (le proxy n'écoute que sur loopback).
-- [ ] Kubeconfig bidon côté zone agent : `server: http://127.0.0.1:<port>`, `token: ignore`.
-- [ ] **Deux couches indépendantes** : `--reject-methods` rend le proxy read-only, le RBAC rend le jeton read-only. Le filtre regex est best-effort : **le RBAC est le contrôle réel.**
+  `--reject-paths` **remplace** les motifs par défaut (qui ne couvrent que `exec`/`attach`) → les réinclure, et y ajouter `portforward`, `secrets` et le sous-chemin **`proxy`** des pods, services et nœuds — ce dernier fait poster l'API server vers un service interne, et même si le RBAC ne l'accorde pas, il relève du même filtre que `exec`. `--accept-hosts` **n'est pas touché** : le défaut est le loopback seul, et le port est retiré avant le match — l'élargir à `.*` aurait affaibli le contrôle sans rien résoudre. `MemoryMax=` n'est pas décoratif : c'est la seule borne mémoire du proxy (les corps ne sont pas retenus par `kubectl proxy`, mais rien ne borne le nombre de `watch` ouverts).
+- [x] Kubeconfig de la zone agent : `server: http://127.0.0.1:<port>`, `token: ignore` — une **adresse**, aucun secret. C'est ce que l'image du harnais consomme.
+- [x] **Deux couches indépendantes, plus une troisième** : `--reject-methods` rend le proxy read-only, le RBAC rend le jeton read-only, les chemins sensibles sont refusés. Le filtre de chemins est best-effort par nature : **le RBAC est le contrôle réel.**
+- [x] `k8s_broker_enabled: false` retire unité, binaire et kubeconfigs (celui du broker **et** celui de la zone agent) : le jeton ne survit pas au composant qui l'utilisait.
+
+**Ce que les mesures ont établi** — deux défauts ouverts par défaut, qui ne se voient pas à l'œil nu :
+
+| Point | Résultat mesuré |
+|---|---|
+| `--reject-methods` par défaut | **`^$` — ne rejette rien.** Le « POST,PUT,PATCH » du plan est l'*exemple* de l'aide, pas le défaut, et il n'inclut pas `DELETE`. Le drapeau n'est pas un durcissement facultatif : sans lui le proxy laisse tout passer. |
+| `--reject-methods` = liste de regex | Séparées par des virgules et compilées une par une, match **non ancré** : une alternance `^(POST\|PUT)$` serait découpée en regex invalides et le proxy mourrait au démarrage. Liste simple uniquement. |
+| `--reject-paths` par défaut | `^/api/.*/pods/.*/exec,^/api/.*/pods/.*/attach` : ni `portforward`, ni `secrets`. Le poser **remplace** ces motifs. |
+| `--accept-hosts` par défaut | Loopback seulement, et le port est **retiré** avant le match (`net.SplitHostPort`) : `Host: 127.0.0.1:8001` passe. La piste « ajouter `--accept-hosts='.*'` si un 403 apparaît » était donc à la fois inutile et affaiblissante. |
+| Kubeconfig lu par le service | `0600 root:broker` **ne marche pas** (voir ci-dessus) : `0640 root:broker`, même forme que le `config.yaml` du gateway. |
+| `/version` comme contrôle d'effet | **Ne prouve rien** : `system:public-info-viewer` est lié à `system:authenticated` **et** à `system:unauthenticated`. Le contrôle d'effet porte sur `/api`, refusé à un appelant anonyme — un port qui écoute ne prouve pas que le jeton authentifie. |
+| En-têtes entrants | L'`Authorization` de l'agent est **écrasé** par le credential du kubeconfig ; en revanche `Impersonate-*` serait transmis → refusé par le RBAC, qui n'a aucun droit d'impersonation. |
+| Paquet `kubernetes-client` | **Aucun candidat** sur Ubuntu 26.04 : le binaire vient de `dl.k8s.io`, épinglé **version et sha256** (`get_url: checksum:`) — le seul téléchargement du dépôt qui vérifie son artefact, et l'idempotence vient de là (pas de `stat`). |
+| Conteneur de la zone agent | Un conteneur n'atteint le broker qu'avec **deux flags**, pas un : `--network=host` (Podman partage le netns de l'hôte) **et** `--runtime-flag network=host` (runsc utilise hostinet au lieu de son netstack). Mesuré : sous `runsc` avec Podman seul, le sandbox n'a **aucune interface** (`ip -o addr` vide, `Network unreachable`) — sous Podman rootless, runsc n'a pas les permissions pour reconfigurer le netns et retire les IP des interfaces ([gVisor #9398](https://github.com/google/gvisor/issues/9398)). Avec les deux flags : `lo` + `eth0` visibles, broker joignable, et **le filtre tient** — `10.20.4.10:6443` et `1.1.1.1` expirent toujours. Le second flag peut être livré globalement par le rôle `podman_gvisor` dans son enveloppe `runsc` (`podman_gvisor_hostinet`), mais il est **désactivé par défaut** : il basculerait *tous* les conteneurs en hostinet, y compris ceux qui n'ont jamais demandé le réseau de l'hôte. Le chemin étroit — recommandé — est `--runtime-flag network=host` sur le seul conteneur concerné, au même endroit que `--network=host` dans la config du harnais. (`[engine.runtimes_flags]` dans `containers.conf` ferait la même chose que le wrapper, mais cette table n'existe qu'à partir de podman 5.6 et serait **ignorée en silence** avant — d'où le wrapper, qui ne dépend d'aucune version.) Une virtual IP routable a été écartée : elle exigerait d'ouvrir une exception non-loopback dans le ruleset de la Phase 1, là où les flags n'en demandent aucune. |
+| Filtre vérifiable **sans cluster** | Le filtre décide **avant** l'amont : avec un kubeconfig pointant sur un port mort, `403` = refus du filtre et `500` = requête laissée passer. Toute la pile a donc été vérifiée avant même d'avoir le kubeconfig : `DELETE`/`POST` 403, `secrets` 403 (les deux préfixes), `pods/exec` 403, `nodes/*/proxy` 403, `services/*/proxy` 403, `Host` étranger 403 — et `GET /api`, `pods/log` en **500**, donc bien laissés passer. |
+| Cache de `kubectl proxy` | **Aucune écriture** dans `$HOME/.kube` : le proxy ne construit pas de client de découverte, son journal ne porte que « Starting to serve » et les erreurs d'amont. Le dossier reste donc **root:broker 0750**, comme les autres composants : le service ne peut pas remplacer le kubeconfig qu'il lit. |
+
+**Ce qui reste dehors, et pourquoi :**
+
+- **Appliquer le RBAC depuis le play** : non — le dépôt ne possède pas le cluster, et le faire exigerait d'y laisser un kubeconfig d'admin. Le manifeste est livré, la pose appartient au déploiement.
+- **Renouvellement de jeton par le broker** : non — voir la case sur la durée de vie.
+- **`kubectl` dans la zone agent** : non — le harnais exécute ses commandes dans un conteneur isolé, donc c'est le binaire de **l'image** qui sert ; un binaire nu dans la zone agent ne serait jamais utilisé. Le rôle n'installe que celui du broker (`/opt/k8s-broker/bin`, 0750, hors de portée de la zone agent).
+- **Un ClusterRole « plus fin »** (namespaces nommés, ressources limitées) : c'est une décision de déploiement, pas un défaut du projet — le manifeste livré est le point de départ, à rétrécir si le cas d'usage le demande.
+
+**Ce que `--network=host` ouvre et ce qu'il ne touche pas** — mesuré, parce que la question revient à chaque harnais conteneurisé :
+
+| | Résultat |
+|---|---|
+| Filtre uid/subuid | **Tient** : le VIP du cluster, `1.1.1.1` et **le port d'Ollama** (fermé en Phase 2) expirent tous depuis le conteneur en `--network=host`. |
+| Capabilities du sandbox | `CapEff=0x800405fb` : **ni `NET_RAW` ni `NET_ADMIN`** — pas de sockets brutes (donc pas d'écoute du trafic), pas de modification du pare-feu ni des interfaces de l'hôte. |
+| Loopback de l'hôte | **Ouvert** : le conteneur joint le broker, le gateway et le proxy, et — mesuré — il peut **y écouter** (`python -m http.server` sur `127.0.0.1:9999` → 200 depuis l'hôte). UFW ne couvre pas le loopback. |
+| Sans `--network=host`, avec hostinet seul | **Son propre loopback** : `127.0.0.1:8001` est refusé. Le drop-in global n'ouvre donc rien par lui-même — c'est la moitié Podman du couple qui déplace la frontière, par conteneur et explicitement. |
+| `runsc network=host` (hostinet) | Delta d'isolation : les sockets du sandbox sont celles du **noyau de l'hôte** au lieu du netstack de gVisor — la doc gVisor le dit, ce mode « decreases the isolation to the host ». L'interposition des syscalls, elle, reste. **Et ce delta vaut même sans `--network=host`** : un conteneur dans son propre netns garde son loopback, mais ses paquets sont parsés par la pile du noyau — c'est une **surface d'attaque**, pas une joignabilité. D'où le défaut à `false`. |
+
+**Règle qui en découle.** Sous host networking, le loopback de la VM cesse d'être privé : c'est un domaine partagé avec la zone agent. Donc **tout nouveau service qui s'écoute en loopback doit soit figurer dans `agent_egress_blocked_loopback_ports`, soit authentifier ses appelants** — le port du provider (Phase 2) et le blocage DNS (Phase 1) en sont les deux instances actuelles, le broker et le proxy les portes assumées.
+
+**Risques résiduels, consignés :**
+
+1. **Le filtre de chemins est best-effort** : une requête encodée (`%73ecrets`) peut le franchir. Le RBAC est le contrôle réel — et il n'accorde ni `secrets` ni `pods/exec`.
+2. **Les en-têtes `Impersonate-*` sont transmis** par le proxy et refusés par le RBAC : un ClusterRole qui accorderait `impersonate` ouvrirait une escalade. À ne jamais accorder.
+3. **Un jeton long dans un home en 0700** : la surface restante est la VM elle-même. Rotation = régénération du kubeconfig + relance du play.
+4. **Un nouveau chemin loopback pour l'agent** (`127.0.0.1:8001`), comme les routes d'admin du gateway : la Phase 7 doit le connaître.
+5. **Le broker est le seul chemin vers le cluster** : `Restart=always`, et l'absence de repli est la propriété recherchée, pas un défaut.
+6. **« Aucun accès aux objets `Secret` » ne veut pas dire « aucune donnée sensible »** : les variables d'environnement d'un pod (`get pods -o yaml`), les ConfigMaps de `kube-system`, et surtout les **logs** (`pods/log`, accordé — un agent SRE en a besoin) contiennent régulièrement des jetons, des chaînes de connexion ou des variables dumpées au démarrage. Le ClusterRole est cluster-wide : c'est le prix d'un agent SRE, assumé, mais c'est une surface d'exfiltration — bornée par le proxy L7 (Phase 3) et par l'alerte sur volume (Phase 7).
+
+**Corrigé après une review externe.** Trois défauts réels : `MemoryMax=` était défini dans les variables et documenté, mais **absent de l'unité** — une variable morte, et aucune borne mémoire ; la sonde `uri` du contrôle d'effet pouvait être routée par un `HTTP_PROXY` présent dans l'environnement de la cible (d'où `use_proxy: false`) ; le filtre de chemins laissait passer les **sous-ressources `proxy`** des pods, services et nœuds, qui font poster l'API server vers un service interne. Le ClusterRole a par ailleurs été élargi aux API qu'un agent SRE lit réellement : `endpointslices` (que `kubectl describe svc` appelle), autoscalers, disruption budgets, storage classes, leases.
+
+**Trois points rejetés, mesures et principe à l'appui :**
+
+| Point | Ce qui a été mesuré |
+|---|---|
+| `--cache-dir` forcé sous le home (« kubectl écrit son cache dans `$HOME/.kube/cache`, refusé en 0750 root ») | **Aucune écriture de cache** : `kubectl proxy` ne construit pas de client de découverte — le cache appartient aux commandes `kubectl get`, pas au proxy. Le dossier reste **root:broker 0750**, la forme des autres composants. |
+| Table de checksums par architecture (amd64 **et** arm64) | Le projet **provisionne de l'amd64** (`ubuntu-26.04-server-cloudimg-amd64`), et `runsc` comme `uv` sont déjà figés en `x86_64`. Une table serait de la machinerie pour une plateforme que le dépôt ne déploie pas ; **une assertion** le dit en trois lignes, avec un message qui dit quoi faire. |
+| `apiGroups: ["*"]` pour couvrir les CRDs d'un coup | Refusé : cette règle lirait aussi **chaque futur CR** et chaque sous-ressource de chaque groupe, sans que le fichier ne le dise — alors que le RBAC est précisément le contrôle sur lequel ce design s'appuie. Le manifeste montre comment **nommer** ses groupes, et `apiextensions.k8s.io` donne déjà la carte des CRDs présents. |
 
 #### 🌟 Phase 5 — Broker git (propositions de PR)
 
@@ -545,6 +623,7 @@ IPAddressAllow=localhost
 WantedBy=multi-user.target
 ```
 
+- [ ] **Le harnais exécute ses commandes dans un conteneur** (constat de la Phase 4) : l'outillage vit donc dans **l'image**, pas dans la zone agent — un `kubectl` installé nu ne servirait à rien. C'est l'image qui porte le client du broker, et elle n'atteint les services loopback (broker, proxy L7) qu'en `--network=host`, avec le `$HOME` du harnais monté (kubeconfig bidon, variables de proxy). À trancher ici : le provider livre-t-il une image par défaut, ou documente-t-il seulement la recette ?
 - [ ] **Reprendre l'environnement du proxy dans l'unité** : `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` et, au niveau 2, `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`NODE_EXTRA_CA_CERTS`. `/etc/profile.d` n'atteint ni une unité systemd ni une session SSH non interactive (`ssh harnais@vm "curl …"`) — le fichier de profil de `agent_egress_proxy` ne sert qu'aux sessions interactives. À vérifier aussi : que la pile HTTP du harnais honore réellement ces variables.
 - [ ] Mettre à jour le sudoers scopé (`systemctl restart {{ harness_name }}`) : déployé par `harness_user`, il référence une unité qui n'existe qu'à partir d'ici.
 - [ ] `security_hardening` copie les `authorized_keys` de l'admin vers le harnais (même clé pour `ubuntu@` **et** `{{ harness_name }}@`) : rendre ce comportement **optionnel**, et documenter que ça fusionne les identités.
@@ -575,6 +654,10 @@ WantedBy=multi-user.target
 | Second VM pour la zone de confiance | Frontière interne faible, compensée par l'absence de secrets. | Quand un secret d'infrastructure entre dans le périmètre. |
 | Outbox + broker de branches (`git am`, `format-patch`) | Surdimensionné : en GitOps, une branche est inoffensive. L'invariant est « pas de droit d'application ». La validation se fait en CI sur la PR (Phase 5). | Si le harnais doit agir **sans validation humaine** — aucun proxy ne peut distinguer une bonne proposition d'une mauvaise. |
 | `kube-rbac-proxy` | Authentifie l'**appelant** avec le jeton de l'appelant → le harnais devrait *avoir* un jeton. | — |
+| Renouvellement du jeton du broker par timer (TokenRequest) | Pour frapper un jeton il faut un credential, et le seul que le broker détiendrait *est* le jeton : au mieux un jeton long qui en produit des courts, avec une unité, un timer et un mode de panne en plus. | Le jour où le cluster sait émettre un jeton sans secret d'amorçage (identité de charge de travail, OIDC). |
+| RBAC du broker appliqué par le play | Le dépôt ne possède pas le cluster, et l'appliquer exigerait d'y laisser un kubeconfig d'admin sur le poste. Le manifeste est livré, la pose appartient au déploiement. | Le jour où le projet déploie aussi le cluster. |
+| Jeton du broker **domicilié dans un coffre** (OpenBao/Vault, source de vérité, matérié par ESO) | Le cluster **frappe** ce jeton : le contrôleur remplit `.data.token` et la valeur est signée par l'apiserver — un coffre ne peut donc pas en être la source, seulement un second domicile. Et la livraison par ESO supposerait que la VM **lise un Secret k8s**, c'est-à-dire le contrôle même que ce design ferme : le credential du broker ne peut pas venir par le broker. | Un IdP externe authentifiant l'apiserver (OIDC), ou le jour où un composant de la VM renouvellerait lui-même son jeton (voir la ligne TokenRequest). |
+| Renouvellement automatique du jeton (CronJob cluster + PushSecret + timer sur la VM) | Quatre composants et deux secrets de plus pour renouveler **un** credential en lecture seule, loopback seul, illisible par l'agent — dont la vraie mitigation est la **révocation** (supprimer le Secret invalide l'ancien jeton immédiatement), pas la rotation. | Une exigence de conformité qui impose une durée de vie bornée. |
 
 ---
 
@@ -621,8 +704,17 @@ ssh <admin>@<vm_ip> "systemctl show egress-proxy -p User -p ActiveState; journal
 # Durcissement du harnais (après Phase 8)
 systemd-analyze security {{ harness_name }}.service
 
-# Broker Kubernetes (après Phase 4)
-kubectl --kubeconfig=<broker_kubeconfig> auth can-i --list
+# Broker Kubernetes (Phase 4) : la zone agent n'a qu'une adresse, jamais le jeton
+ssh {{ harness_name }}@<vm_ip> "curl -s http://127.0.0.1:8001/api"
+# Attendu : la liste des versions de l'API. Une écriture est refusée DEUX fois : par le filtre du
+# proxy (403) puis par le RBAC ; les chemins secrets/exec/portforward le sont aussi.
+ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' -X DELETE http://127.0.0.1:8001/api/v1/namespaces/sre-agent/configmaps/x"
+ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8001/api/v1/namespaces/sre-agent/secrets"
+# Le broker tourne-t-il hors de l'uid du harnais, avec un jeton qui authentifie ?
+ssh <admin>@<vm_ip> "systemctl show k8s-broker -p User -p ActiveState"
+ssh <admin>@<vm_ip> "journalctl -u k8s-broker -n 20"
+# Ce que le jeton peut réellement faire — côté cluster, avec le kubeconfig du broker
+kubectl --kubeconfig=ansible/files/k8s-broker.kubeconfig auth can-i --list
 
 # Validation du code local
 tofu -chdir=iac validate && ansible-lint
@@ -630,4 +722,4 @@ tofu -chdir=iac validate && ansible-lint
 
 ### 📌 Point de départ recommandé
 
-**Phases 0, 1, 2 et 3 faites** (documentation corrigée ; egress de la zone agent filtré ; gateway d'inférence en zone de confiance, table d'alias et port amont fermé ; proxy L7 à allowlist, deux niveaux). Prochaine étape : **Phase 7** (observabilité : elle porte la piste d'audit des prompts, l'audit des routes d'admin du gateway, et la cible commune des journaux du proxy). Les **Phases 4 et 5** ne sont à faire que si un cas d'usage le demande, et **Phase 8** une fois le harnais choisi et installable.
+**Phases 0, 1, 2, 3 et 4 faites** (documentation corrigée ; egress de la zone agent filtré ; gateway d'inférence en zone de confiance, table d'alias et port amont fermé ; proxy L7 à allowlist, deux niveaux ; broker Kubernetes en lecture seule, jeton hors de la zone agent). Prochaine étape : **Phase 7** (observabilité : elle porte la piste d'audit des prompts, l'audit des routes d'admin du gateway, la cible commune des journaux du proxy et le nouveau chemin loopback du broker). La **Phase 5** ne se fait que si un cas d'usage le demande, et **Phase 8** une fois le harnais choisi et installable — c'est elle qui portera l'outillage dans l'image du harnais.

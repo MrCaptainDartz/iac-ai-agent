@@ -7,3 +7,4 @@ trust_zone_home: "/var/lib/{{ trust_zone_user }}"
 trust_zone_dependent_units:
   - "{{ inference_gateway_service_name | default('inference-gateway') }}"
   - "{{ agent_egress_proxy_service_name | default('egress-proxy') }}"
+  - "{{ k8s_broker_service_name | default('k8s-broker') }}"

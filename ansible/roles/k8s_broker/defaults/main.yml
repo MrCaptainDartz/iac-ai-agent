@@ -1,0 +1,20 @@
+---
+# defaults file for k8s_broker
+k8s_broker_enabled: false
+k8s_broker_port: 8001
+k8s_broker_service_name: k8s-broker
+k8s_broker_user: "{{ trust_zone_user | default(broker_name | default('broker')) }}"
+k8s_broker_home: "{{ trust_zone_home | default('/var/lib/' ~ k8s_broker_user) }}"
+k8s_broker_harness_name: "{{ harness_name | default('hermes') }}"
+# The ServiceAccount kubeconfig: a secret, supplied by the deployment.
+k8s_broker_kubeconfig_src: ""
+k8s_broker_kubectl_version: "v1.37.0"
+k8s_broker_kubectl_sha256: "6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f"
+k8s_broker_memory_max: "256M"
+k8s_broker_root: /opt/k8s-broker
+k8s_broker_bin_dir: "{{ k8s_broker_root }}/bin"
+k8s_broker_kubectl: "{{ k8s_broker_bin_dir }}/kubectl"
+k8s_broker_kubeconfig_dir: "{{ k8s_broker_home }}/.kube"
+k8s_broker_kubeconfig: "{{ k8s_broker_kubeconfig_dir }}/config"
+# Handed to the agent zone: an address, never a credential.
+k8s_broker_agent_kubeconfig: "/home/{{ k8s_broker_harness_name }}/.kube/config"
