@@ -81,7 +81,7 @@ variable "vm_config" {
     disk_file_format  = optional(string, "raw")
     machine_type      = optional(string, "q35")
     bios              = optional(string, "ovmf")
-    vga_type          = optional(string, "qxl")
+    vga_type          = optional(string, "virtio")
     keyboard_layout   = optional(string, "fr")
     rng_source        = optional(string, "/dev/urandom")
     start_on_boot     = optional(bool, true)
