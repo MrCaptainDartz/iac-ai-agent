@@ -1,0 +1,249 @@
+---
+# Credential injection for the agent zone: the secret stays in the trust zone, the agent gets an address.
+
+- name: Resolve the proxy user
+  ansible.builtin.command:
+    cmd: "id -u {{ token_proxy_user }}"
+  register: token_proxy_user_check
+  changed_when: false
+  failed_when: false
+  when: token_proxy_enabled | default(false)
+
+- name: Assert the trust zone user exists
+  ansible.builtin.assert:
+    that:
+      - token_proxy_user_check.rc | default(1) == 0
+    fail_msg: >-
+      User '{{ token_proxy_user }}' does not exist. The proxy runs in the trust zone: deploy it
+      (trust_zone_enabled) or point token_proxy_user at an existing user.
+  when: token_proxy_enabled | default(false)
+
+# An enabled proxy that forwards nothing is a silent outage, not a policy.
+- name: Assert the injection list is declared
+  ansible.builtin.assert:
+    that:
+      - token_proxy_injections | length > 0
+    fail_msg: >-
+      token_proxy_enabled is true but token_proxy_injections is empty. Declare the endpoints to
+      inject (or set the flag to false).
+  when: token_proxy_enabled | default(false)
+
+- name: Assert that every injection is complete and its token renderable
+  ansible.builtin.assert:
+    that:
+      - item.locations | default([]) | length > 0
+      - (item.upstream | default('')) is match('^https://[^/\s]+$')
+      - item.auth_header | default('') | length > 0
+      - "' ' in (item.auth_header | default('')) and ': ' in (item.auth_header | default(''))"
+      # A marker is what carries the secret: a header with neither would inject a literal value.
+      - ('TOKEN_B64' in (item.auth_header | default(''))) or ('TOKEN' in (item.auth_header | default('') | replace('TOKEN_B64', '')))
+      # And TOKEN_B64 needs the account name it encodes
+      - ('TOKEN_B64' not in (item.auth_header | default(''))) or (item.basic_user | default('') | length > 0)
+      - item.token_src | default('') | length > 0
+      - (lookup('ansible.builtin.file', item.token_src | default('/nonexistent'), errors='ignore') | default('', true) | trim | length) > 0
+      # nginx reads '$' as a variable and whitespace as the end of the line: '$' has no escape.
+      - (lookup('ansible.builtin.file', item.token_src | default('/nonexistent'), errors='ignore') | default('', true) | trim) is match('^[^$\s]+$')
+    fail_msg: >-
+      The injection for '{{ item.locations | default([]) | join(', ') }}' needs locations, an https://
+      upstream without a path, an auth_header carrying TOKEN or TOKEN_B64 (TOKEN_B64 with the account
+      name it encodes, basic_user), and a token_src holding one line with no '$' — nginx reads that one
+      as a variable, and has no escape for it. A quote or a backslash is accepted: the template escapes
+      them, since nginx reads those as escapes too.
+  loop: "{{ token_proxy_injections }}"
+  loop_control:
+    label: "{{ item.locations | default([]) | join(', ') }}"
+  when: token_proxy_enabled | default(false)
+
+- name: Install nginx
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+    update_cache: true
+  when: token_proxy_enabled | default(false)
+
+# The package starts a server on :80; ours listens on the loopback, under the trust zone uid.
+- name: Stop, disable and mask the distribution unit
+  ansible.builtin.systemd_service:
+    name: "{{ token_proxy_stock_unit }}"
+    state: stopped
+    enabled: false
+    masked: true
+  failed_when: false
+  when: token_proxy_enabled | default(false)
+
+- name: Create the proxy configuration directory
+  ansible.builtin.file:
+    path: "{{ token_proxy_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ token_proxy_user }}"
+    mode: "0750"
+  when: token_proxy_enabled | default(false)
+
+- name: Create the proxy injection directory
+  ansible.builtin.file:
+    path: "{{ token_proxy_injection_dir }}"
+    state: directory
+    owner: root
+    group: "{{ token_proxy_user }}"
+    mode: "0750"
+  when: token_proxy_enabled | default(false)
+
+- name: Deploy the proxy configuration
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: "{{ token_proxy_nginx_conf }}"
+    owner: root
+    group: "{{ token_proxy_user }}"
+    mode: "0640"
+  when: token_proxy_enabled | default(false)
+  notify: Restart token proxy
+
+# A shrunk list must not leave a credential on disk behind an index the config no longer includes.
+- name: Find the deployed injection blocks
+  ansible.builtin.find:
+    paths: "{{ token_proxy_injection_dir }}"
+    patterns: "*.conf"
+  register: token_proxy_deployed_blocks
+  when: token_proxy_enabled | default(false)
+
+- name: Remove the injection blocks that are no longer declared
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ token_proxy_deployed_blocks.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when:
+    - token_proxy_enabled | default(false)
+    - (item.path | basename | splitext | first | int) not in range(1, (token_proxy_injections | length) + 1)
+
+# The credential is written here and nowhere else; each file holds whole location blocks.
+- name: Deploy the injection blocks
+  ansible.builtin.template:
+    src: injection.conf.j2
+    dest: "{{ token_proxy_injection_dir }}/{{ idx + 1 }}.conf"
+    owner: "{{ token_proxy_user }}"
+    group: "{{ token_proxy_user }}"
+    mode: "0600"
+  loop: "{{ token_proxy_injections }}"
+  loop_control:
+    index_var: idx
+    label: "{{ item.locations | join(', ') }}"
+  vars:
+    entry: "{{ item }}"
+  when: token_proxy_enabled | default(false)
+  notify: Restart token proxy
+  no_log: true
+
+- name: Deploy the upstream certificate authorities
+  ansible.builtin.copy:
+    src: "{{ item.ca_src }}"
+    dest: "{{ token_proxy_config_dir }}/ca-{{ idx + 1 }}.pem"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ token_proxy_injections }}"
+  loop_control:
+    index_var: idx
+    label: "{{ item.locations | join(', ') }}"
+  when:
+    - token_proxy_enabled | default(false)
+    - item.ca_src | default('') | length > 0
+  notify: Restart token proxy
+
+- name: Deploy the proxy systemd unit
+  ansible.builtin.template:
+    src: token-proxy.service.j2
+    dest: "/etc/systemd/system/{{ token_proxy_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  when: token_proxy_enabled | default(false)
+  notify: Restart token proxy
+
+- name: Enable the proxy service
+  ansible.builtin.systemd_service:
+    name: "{{ token_proxy_service_name }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  when: token_proxy_enabled | default(false)
+
+- name: Flush handlers so the proxy is checked as configured
+  ansible.builtin.meta: flush_handlers
+  when: token_proxy_enabled | default(false)
+
+- name: Check that the proxy answers on its loopback port
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ token_proxy_port }}"
+    state: started
+    timeout: 60
+    msg: >-
+      Nothing listens on 127.0.0.1:{{ token_proxy_port }}. Read 'journalctl -u
+      {{ token_proxy_service_name }}': nginx refuses to start on a trusted certificate that is
+      missing, or on a token it cannot render.
+  when: token_proxy_enabled | default(false)
+
+# The effect, not the unit state: a listener that injects nothing proves nothing.
+- name: Check that the declared endpoints answer through the proxy
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ token_proxy_port }}{{ item.probe }}"
+    # Never through a proxy: the probe is loopback.
+    use_proxy: false
+  register: token_proxy_probes
+  failed_when: false
+  loop: "{{ token_proxy_injections | selectattr('probe', 'defined') | selectattr('probe', 'truthy') | list }}"
+  loop_control:
+    label: "{{ item.probe }}"
+  when: token_proxy_enabled | default(false)
+
+- name: Assert that the injected credential is accepted
+  ansible.builtin.assert:
+    that:
+      - item.status | default(0) == 200
+    fail_msg: >-
+      '{{ item.item.probe }}' answered {{ item.status | default('nothing') }} through the proxy. Check
+      that the upstream is reachable from this VM, that the token is valid, that the probe carries the
+      form that upstream expects for that path — a forge wanting it encoded wants it here too — and
+      'journalctl -u {{ token_proxy_service_name }}'.
+  loop: "{{ token_proxy_probes.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.probe }}"
+  when: token_proxy_enabled | default(false)
+
+# --- disabled: restore the previous state, service and files included --------------
+
+- name: Stop and disable the proxy service
+  ansible.builtin.systemd_service:
+    name: "{{ token_proxy_service_name }}"
+    state: stopped
+    enabled: false
+  failed_when: false
+  when: not (token_proxy_enabled | default(false))
+
+- name: Remove the proxy systemd unit
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ token_proxy_service_name }}.service"
+    state: absent
+  when: not (token_proxy_enabled | default(false))
+
+# The token does not outlive the component.
+- name: Remove the proxy configuration and its injections
+  ansible.builtin.file:
+    path: "{{ token_proxy_config_dir }}"
+    state: absent
+  when: not (token_proxy_enabled | default(false))
+
+# The trail does not outlive the component, including the file an earlier version wrote it to.
+- name: Remove the proxy log directory
+  ansible.builtin.file:
+    path: /var/log/token-proxy
+    state: absent
+  when: not (token_proxy_enabled | default(false))
+
+- name: Reload the systemd manager configuration
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: not (token_proxy_enabled | default(false))

@@ -1,0 +1,6 @@
+[lfs "transfer"]
+    enablehrefrewrite = true
+[url "http://127.0.0.1:{{ git_broker_http_port }}/"]
+{% for base in git_broker_lfs_rewrite_from %}
+    insteadOf = {{ base }}
+{% endfor %}

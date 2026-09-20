@@ -1,30 +1,23 @@
 ---
-# Global variables for the project
-# Copy this file to 'all.yml' and customize it according to your needs.
+# Global variables for the project. Copy this file to 'all.yml' and customize it.
 
 # Harness / Agent configuration
 harness_name: "hermes" # e.g. "hermes", "openclaw", "smolagents" (lowercase alphanumeric + hyphens)
-
-# Optional additional SSH public keys for the harness user
-harness_ssh_keys: []
+harness_ssh_keys: [] # Additional SSH public keys for the harness user
 
 # SSH Security Configuration
 ssh_allow_tcp_forwarding: false # Set to true if SSH port forwarding/tunneling is needed
 
+# Sources fail2ban never bans: the SSH jail counts a connection that never authenticated as a failure.
+security_hardening_fail2ban_ignoreip: "127.0.0.1/8 ::1"
+
 # Container runtime & gVisor configuration
 gvisor_enabled: true
-gvisor_default: true # When true, gVisor (runsc) is used as the default OCI runtime for all containers
+gvisor_default: true # gVisor (runsc) as the default OCI runtime for all containers
+podman_gvisor_hostinet: false # Give containers gVisor's host stack, as --network=host needs
+podman_gvisor_netns: "" # Default network mode for every container, in Podman's vocabulary
 
-# Give every container gVisor's host stack instead of its netstack (default: false).
-# Required for `--network=host` under rootless Podman unless passed per container (`--runtime-flag network=host`).
-podman_gvisor_hostinet: false
-
-# Default network mode for EVERY container, in Podman's vocabulary ("" leaves it to Podman).
-# Not required if the harness container itself is launched with `--network=host`.
-podman_gvisor_netns: ""
-
-# Egress control: filter the agent zone's outbound traffic by uid — loopback only,
-# name resolution included. Set to false to leave the outbound path unrestricted.
+# Filter the agent zone's outbound traffic by uid — loopback only, name resolution included.
 agent_egress_filter_enabled: true
 
 # Node.js / NVM configuration
@@ -36,38 +29,30 @@ uv_python_version: "3.14" # Python version managed by uv (e.g. "3.14", "3.13", "
 
 # System configuration
 system_timezone_value: "Europe/Paris"
+# False on a VM that does not survive its own reboots: the play then ends on the running kernel.
+system_reboot_on_kernel_update: true
 
-# Additional custom system packages to install (e.g. ["zsh", "fish"])
-essential_packages_extra: []
+essential_packages_extra: [] # Additional custom system packages (e.g. ["zsh", "fish"])
 
 # Ollama configuration
-# Set to false if you already have an external inference server and only want the agent environment
-ollama_enabled: true
+ollama_enabled: true # false if you already have an external inference server
+ollama_signin_required: false # true if you pull models that need interactive OAuth authentication
 
-# Set to true if you pull models that need interactive OAuth authentication
-ollama_signin_required: false
-
-# Models to pull automatically.
-# Default: a small local model + an embedding model — nothing leaves the VM.
-# Remote models are a deployment choice, declare them here:
-#   - <remote-model>:cloud   # requires ollama_signin_required: true
+# Models to pull automatically; <remote-model>:cloud needs ollama_signin_required.
 ollama_models:
   - qwen3:4b
   - qwen3-embedding:0.6b
 
-# Trust zone: the system user that runs components holding a secret (the gateway today, the
-# brokers later). It never executes code produced by the model.
+# Trust zone: the system user that runs components holding a secret, never model-produced code.
 trust_zone_enabled: true
 broker_name: "broker"
 
-# Inference gateway: the agent asks for a role alias, never for a provider model, so its own
-# configuration does not change when the provider does. The alias table is REQUIRED.
+# Inference gateway: the agent asks for a role alias, never a provider model. The alias table is REQUIRED.
 inference_gateway_enabled: true
 inference_gateway_port: 4000
-inference_gateway_upstream_url: "http://127.0.0.1:11434" # local provider; its port is closed to the agent zone
+inference_gateway_upstream_url: "http://127.0.0.1:11434" # local provider; closed to the agent zone
 
-# Alias the agent sees -> real provider model. Prefix picks the endpoint: ollama_chat/ for chat
-# (tool calling), ollama/ for embeddings. api_base applies to local models only.
+# Alias the agent sees -> real provider model; the prefix picks the endpoint (ollama_chat/ or ollama/).
 inference_gateway_models:
   - alias: reasoning
     model: "ollama_chat/qwen3:4b"
@@ -77,31 +62,59 @@ inference_gateway_models:
 #     model: "deepseek/deepseek-v4"
 #     api_key: "<key>"
 
-# litellm's detailed debug stream — prompts included, hundreds of journal lines per request.
-# It is a debugging aid, not an audit trail: Phase 7 owns the real log sink.
+# litellm's debug stream, prompts included: a debugging aid, not an audit trail (Phase 7 owns the sink).
 inference_gateway_debug_logging: false
 
-# L7 egress proxy (the adaptation brick): the agent zone's only way out, under a declared
-# allowlist. Off by default — the socle gives the agent no web egress at all.
+# L7 egress proxy: the agent zone's only way out, under an allowlist. Off: no web egress at all.
 agent_egress_proxy_enabled: false
 agent_egress_proxy_port: 8080
 
-# [.]host[:port][/path] — a leading dot covers subdomains, no port means 80 and 443.
-# Entries combine, and a path prefix needs TLS interception (level 2).
+# [.]host[:port][/path]: a dot covers subdomains, no port means 80 and 443, a path needs level 2.
 agent_egress_proxy_allowlist:
   - example.com
   - .githubusercontent.com
-#   - "*"                     # any public host on 80 and 443 (add "*:8443" for another port):
-#                             # gives up the per-destination control and resolves every name
+#   - "*"                     # any public host on 80 and 443 (add "*:8443" for another port)
 #   - api.example.com/v1/     # level 2 only: paths are invisible without interception
 
-# Level 2: TLS interception with an internal CA. Buys path rules and per-request visibility;
-# costs that CA in every client stack (system, Python/Node, harness) and breaks cert pinning.
+# Level 2: an internal CA buys path rules and per-request visibility, and breaks certificate pinning.
 agent_egress_proxy_tls_intercept: false
 
-# Kubernetes broker (read-only): the agent zone reaches a cluster through a loopback endpoint held by. the trust zone, so the token never enters the agent zone.
+# Kubernetes broker (read-only): a loopback endpoint held by the trust zone, never its token.
 k8s_broker_enabled: false
 k8s_broker_port: 8001
+k8s_broker_kubeconfig_src: "{{ inventory_dir }}/../files/k8s-broker.kubeconfig" # a file, not a variable
 
-# The ServiceAccount kubeconfig: kept out of the repository, so it is a file and not a variable.
-k8s_broker_kubeconfig_src: "{{ inventory_dir }}/../files/k8s-broker.kubeconfig"
+# Git broker: branches, push and pull requests from the agent zone, over the forge's own SSH transport.
+git_broker_enabled: false
+git_broker_ssh_port: 2222
+git_broker_forge_ssh_user: git
+git_broker_forge_ssh_host: ""            # github.com, gitlab.com, or your Forgejo host
+git_broker_forge_ssh_port: 22            # ssh.github.com serves 443 when 22 is filtered
+git_broker_repos: []                     # only these, as the forge names them: ["owner/repo.git"]
+git_broker_forge_host_key: ""            # ssh-keyscan -p <port> <host>, pinned (see README)
+git_broker_ssh_key_src: "{{ playbook_dir }}/output/git-broker.key" # generated there; point it at a file of yours to supply it
+
+# The HTTP half, through the injection proxy: the paths derive from git_broker_repos.
+git_broker_api_upstream: ""              # a bare origin — no path, not even a slash: https://git.example.com
+git_broker_api_repo_prefix: "/api/v1/repos/"   # Forgejo; GitLab: /api/v4/projects/ ; GitHub: /repos/
+git_broker_api_auth_header: "Authorization: token TOKEN"   # GitHub: Bearer <…> ; GitLab: PRIVATE-TOKEN: <…>
+git_broker_api_read_methods: ['GET']
+git_broker_api_proposal_methods: ['GET', 'POST', 'PATCH'] # PATCH: edit or close a PR, the first widening
+git_broker_allow_merge: false            # POST /pulls/N/merge: closed — a merge is a human gesture
+git_broker_merge_whitelist: []           # [] or ["*"] = every declared repo, else those declared here
+# The probe is derived (a GET on the first declared repository) — a request, not a match pattern.
+# git_broker_api_probe: "/api/v1/repos/owner/repo"
+# git_broker_api_probe: "/api/v4/projects/group%2Fproject"
+git_broker_api_ca_src: ""                # a self-signed front: the authority, a file on the control node
+git_broker_lfs_enabled: true
+git_broker_lfs_upstream: "{{ git_broker_api_upstream }}" # GitHub serves LFS on github.com, not its API
+git_broker_lfs_basic_user: ""            # LFS wants Basic <base64(user:token)>: the account's name
+# git_broker_lfs_rewrite_extra: ["https://forge.example.com/"] # if the forge's public name is a third one
+
+# The forge token (API and LFS): a secret, so a file; one line, with no "$" (nginx has no escape for it).
+git_broker_token_src: "{{ inventory_dir }}/../files/git-broker.token"
+
+# Token injection proxy: the primitive a broker declares its endpoints into (required by git_broker).
+token_proxy_enabled: false
+token_proxy_port: 8002
+token_proxy_ca_bundle: /etc/ssl/certs/ca-certificates.crt # for an authority the system already trusts

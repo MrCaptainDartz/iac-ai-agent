@@ -1,0 +1,62 @@
+# Token injection block (Ansible Managed): the agent sends no credential, this line replaces any.
+{% if entry.refused_paths | default([]) | length > 0 %}
+# Closed here, before the prefix below would admit them: a regex location wins over a prefix.
+{% for pattern in entry.refused_paths %}
+location ~ {{ pattern }} { return 403; }
+{% endfor %}
+{% endif %}
+{% set header_name, header_value = entry.auth_header.split(': ', 1) %}
+{% set token = lookup('ansible.builtin.file', entry.token_src) | trim %}
+{% set marker = 'TOKEN_B64' if 'TOKEN_B64' in header_value else 'TOKEN' %}
+{% set secret = ((entry.basic_user | default('') ~ ':' ~ token) | b64encode) if marker == 'TOKEN_B64' else token %}
+{# 'TOKEN' occurs in valid base64: the replacement happens in one pass, never twice. #}
+{% set value = header_value | replace(marker, secret) %}
+{# nginx reads '\' and '"' as escapes inside its quoted value: escaped here, the token travels whole. #}
+{% set value = value | replace('\\', '\\\\') | replace('"', '\\"') %}
+{% macro emit(modifier, location) %}
+
+location {{ modifier }}{{ location }} {
+    # An escape both sides would not read the same way is refused here: see the map in nginx.conf.
+    if ($token_proxy_escaped_path) { return 403; }
+
+    proxy_pass {{ entry.upstream }};
+    proxy_set_header {{ header_name }} "{{ value }}";
+{% if header_name != 'Authorization' %}
+    # A forge preferring the client's Authorization over the header it was given sees none: GitLab.
+    proxy_set_header Authorization "";
+{% endif %}
+
+    proxy_set_header Host {{ entry.host_header | default('$proxy_host') }};
+    # A verb the upstream might honour from a header is not the verb this boundary admitted.
+    proxy_set_header X-HTTP-Method-Override "";
+{% if entry.allowed_methods | default([]) | length > 0 %}
+
+    limit_except {{ entry.allowed_methods | join(' ') }} { deny all; }
+{% endif %}
+
+    proxy_ssl_verify on;
+    proxy_ssl_server_name on;
+{% if entry.ca_src | default('') | length > 0 %}
+    proxy_ssl_trusted_certificate {{ token_proxy_config_dir }}/ca-{{ idx + 1 }}.pem;
+{% else %}
+    proxy_ssl_trusted_certificate {{ token_proxy_ca_bundle }};
+{% endif %}
+
+    # Streams, never buffers: the same block carries an API body and an LFS object.
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_request_buffering off;
+    client_max_body_size {{ entry.max_body_size | default('10m') }};
+    proxy_read_timeout {{ entry.read_timeout | default('60s') }};
+}
+{% endmacro %}
+{# The path exactly, then its subtree: a bare prefix would also route a repository whose name extends it. #}
+{% for location in entry.locations %}
+{%   if location.endswith('/') %}
+{{ emit('', location) -}}
+{%   else %}
+{{ emit('= ', location) -}}
+{{ emit('', location ~ '/') -}}
+{%   endif %}
+{% endfor %}

@@ -1,0 +1,27 @@
+# Git broker SSH front (Ansible Managed): loopback only, one user, whose shell is the relay.
+Port {{ git_broker_ssh_port }}
+ListenAddress 127.0.0.1
+HostKey {{ git_broker_host_key }}
+PidFile /run/{{ git_broker_service_name }}/sshd.pid
+AllowUsers {{ git_broker_user }}
+AuthorizedKeysFile {{ git_broker_home }}/.ssh/authorized_keys
+# The trust zone user has no password: sshd refuses a locked account unless PAM carries the check.
+UsePAM yes
+PasswordAuthentication no
+PubkeyAuthentication yes
+# Pinned: under UsePAM yes, keyboard-interactive stays offered unless it is refused by name.
+KbdInteractiveAuthentication no
+AuthenticationMethods publickey
+PermitRootLogin no
+PermitTTY no
+AllowTcpForwarding no
+AllowAgentForwarding no
+AllowStreamLocalForwarding no
+PermitTunnel no
+PermitUserEnvironment no
+X11Forwarding no
+# Protocol v2 travels in this variable: accepted here, forwarded upstream by the relay.
+AcceptEnv GIT_PROTOCOL
+# The only possible source is this VM: the penalty would lock the harness out of its own broker.
+PerSourcePenalties no
+LogLevel VERBOSE

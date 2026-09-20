@@ -1,0 +1,415 @@
+---
+# Git proposals from the agent zone: the deployment key stays in the trust zone, one session at a time.
+
+- name: Assert the trust zone is deployed
+  ansible.builtin.assert:
+    that:
+      - trust_zone_enabled | default(false)
+    fail_msg: >-
+      git_broker_enabled is true but trust_zone_enabled is false. The broker holds a deployment key:
+      it runs under a trust zone user, never under the harness uid.
+  when: git_broker_enabled | default(false)
+
+# sshd hands the command to the user's shell, and trust_zone rewrites its own user's shell: one uid each.
+- name: Assert the broker user is a trust zone user of its own
+  ansible.builtin.assert:
+    that:
+      - git_broker_user is match('^[a-z0-9-]+$')
+      - git_broker_user != git_broker_harness_name
+      - git_broker_user != (trust_zone_user | default(broker_name | default('broker')))
+      # This account's shell becomes the relay and its home this broker's: never an account you log in as.
+      - git_broker_user != 'root'
+      - git_broker_user != (ansible_user | default(''))
+    fail_msg: >-
+      git_broker_user must be a lowercase system user, distinct from the harness user, from the uid
+      the other components share, and from root or the account this play connects as: the role makes
+      it the relay's shell and gives it this broker's home.
+  when: git_broker_enabled | default(false)
+
+- name: Assert that the forge endpoint and the repositories are declared
+  ansible.builtin.assert:
+    that:
+      - git_broker_forge_ssh_host | length > 0
+      - git_broker_forge_ssh_user | length > 0
+      - git_broker_repos | length > 0
+      - git_broker_forge_host_key | length > 0
+      - git_broker_ssh_key_src | length > 0
+      - (lookup('ansible.builtin.file', git_broker_ssh_key_src | default('/nonexistent'), errors='ignore') | default('', true) | trim | length) > 0
+    fail_msg: >-
+      git_broker_enabled is true but the forge endpoint, the repositories, the forge host key or the
+      deployment key is missing or unreadable. See the README, or set the flag to false.
+  when: git_broker_enabled | default(false)
+
+# The relay rebuilds its command from these words and the proxy builds paths from them: one shape only.
+- name: Assert the declared repositories are shaped for the relay and for the proxy
+  ansible.builtin.assert:
+    that:
+      - git_broker_repos | type_debug == 'list'
+      - git_broker_merge_whitelist | type_debug == 'list'
+      - git_broker_repos | select('search', '[^A-Za-z0-9._/-]') | length == 0
+      - git_broker_repos | select('search', '/$') | length == 0
+      - (git_broker_repos | map('regex_replace', '^/', '') | map('regex_replace', '\.git$', '') | unique | length) == (git_broker_repos | length)
+      - >-
+        (git_broker_api_read_locations + git_broker_api_proposal_locations + git_broker_lfs_locations) | unique | length
+        == (git_broker_api_read_locations + git_broker_api_proposal_locations + git_broker_lfs_locations) | length
+      - >-
+        (git_broker_merge_whitelist | map('regex_replace', '^/', '') | map('regex_replace', '\.git$', '')
+         | difference(['*'] + git_broker_api_repo_names) | list | length) == 0
+    fail_msg: >-
+      git_broker_repos and git_broker_merge_whitelist are YAML lists — a string would be iterated
+      character by character, one repository per letter. Every entry of git_broker_repos must be made
+      of letters, digits, '.', '_', '/' and '-', must
+      not end with a slash, and no two entries may share a repository name or derive one location —
+      the read, proposal and LFS paths of a repository do not overlap. A space or a quote breaks the
+      command the relay rebuilds, and two identical locations make nginx refuse to start — the whole
+      proxy, not that entry. Every entry of git_broker_merge_whitelist is '*' or a repository declared
+      above.
+  when: git_broker_enabled | default(false)
+
+- name: Create the trust zone user for the broker
+  ansible.builtin.user:
+    name: "{{ git_broker_user }}"
+    comment: "Git broker trust zone user"
+    system: true
+    create_home: true
+    home: "{{ git_broker_home }}"
+    shell: "{{ git_broker_relay }}"
+  when: git_broker_enabled | default(false)
+
+# 0700, not 0750 like the harness: the agent zone stays out of the key.
+- name: Restrict the broker home directory
+  ansible.builtin.file:
+    path: "{{ git_broker_home }}"
+    owner: "{{ git_broker_user }}"
+    group: "{{ git_broker_user }}"
+    mode: '0700'
+    state: directory
+  when: git_broker_enabled | default(false)
+
+- name: Create the broker binary directory
+  ansible.builtin.file:
+    path: "{{ git_broker_bin_dir }}"
+    state: directory
+    owner: root
+    group: "{{ git_broker_user }}"
+    mode: '0750'
+  when: git_broker_enabled | default(false)
+
+- name: Deploy the relay
+  ansible.builtin.template:
+    src: relay.j2
+    dest: "{{ git_broker_relay }}"
+    owner: root
+    group: root
+    mode: '0755'
+  when: git_broker_enabled | default(false)
+  notify: Restart git broker
+
+- name: Create the broker configuration directory
+  ansible.builtin.file:
+    path: "{{ git_broker_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ git_broker_user }}"
+    mode: '0750'
+  when: git_broker_enabled | default(false)
+
+- name: Deploy the SSH front configuration
+  ansible.builtin.template:
+    src: sshd.conf.j2
+    dest: "{{ git_broker_sshd_conf }}"
+    owner: root
+    group: root
+    mode: '0644'
+  when: git_broker_enabled | default(false)
+  notify: Restart git broker
+
+- name: Generate the broker host key
+  ansible.builtin.command:
+    cmd: "ssh-keygen -q -t ed25519 -N '' -C {{ git_broker_service_name }} -f {{ git_broker_host_key }}"
+    creates: "{{ git_broker_host_key }}"
+  when: git_broker_enabled | default(false)
+  notify: Restart git broker
+
+- name: Create the broker SSH directory
+  ansible.builtin.file:
+    path: "{{ git_broker_home }}/.ssh"
+    state: directory
+    owner: "{{ git_broker_user }}"
+    group: "{{ git_broker_user }}"
+    mode: '0700'
+  when: git_broker_enabled | default(false)
+
+# ssh refuses a key any other identity can read, so this one belongs to the user that reads it.
+- name: Deploy the deployment key
+  ansible.builtin.copy:
+    src: "{{ git_broker_ssh_key_src }}"
+    dest: "{{ git_broker_ssh_key }}"
+    owner: "{{ git_broker_user }}"
+    group: "{{ git_broker_user }}"
+    mode: '0600'
+  when: git_broker_enabled | default(false)
+  notify: Restart git broker
+  no_log: true
+
+- name: Pin the forge host key
+  ansible.builtin.copy:
+    content: "{{ git_broker_forge_host_key }}\n"
+    dest: "{{ git_broker_known_hosts }}"
+    owner: root
+    group: root
+    mode: '0644'
+  when: git_broker_enabled | default(false)
+  notify: Restart git broker
+
+# sshd's privilege separation directory: shared with the distribution's sshd, so it survives teardown.
+- name: Create the SSH privilege separation directory
+  ansible.builtin.file:
+    path: /run/sshd
+    owner: root
+    group: root
+    mode: '0755'
+    state: directory
+  when: git_broker_enabled | default(false)
+
+- name: Deploy the broker systemd unit
+  ansible.builtin.template:
+    src: git-broker-ssh.service.j2
+    dest: "/etc/systemd/system/{{ git_broker_service_name }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+  when: git_broker_enabled | default(false)
+  notify: Restart git broker
+
+- name: Create the agent zone SSH directory
+  ansible.builtin.file:
+    path: "{{ git_broker_agent_ssh_dir }}"
+    state: directory
+    owner: "{{ git_broker_harness_name }}"
+    group: "{{ git_broker_harness_name }}"
+    mode: '0700'
+  when: git_broker_enabled | default(false)
+
+# A placeholder: the broker re-originates the session, this key grants nothing but the relay.
+- name: Generate the agent zone placeholder key
+  ansible.builtin.command:
+    cmd: "ssh-keygen -q -t ed25519 -N '' -C git-broker-placeholder -f {{ git_broker_agent_key }}"
+    creates: "{{ git_broker_agent_key }}"
+  when: git_broker_enabled | default(false)
+
+- name: Hand the placeholder key to the harness user
+  ansible.builtin.file:
+    path: "{{ item }}"
+    owner: "{{ git_broker_harness_name }}"
+    group: "{{ git_broker_harness_name }}"
+    mode: '0600'
+  loop:
+    - "{{ git_broker_agent_key }}"
+    - "{{ git_broker_agent_key }}.pub"
+  when: git_broker_enabled | default(false)
+
+- name: Read the placeholder public key
+  ansible.builtin.slurp:
+    src: "{{ git_broker_agent_key }}.pub"
+  register: git_broker_placeholder_pub
+  when: git_broker_enabled | default(false)
+
+- name: Read the broker host public key
+  ansible.builtin.slurp:
+    src: "{{ git_broker_host_key }}.pub"
+  register: git_broker_host_pub
+  when: git_broker_enabled | default(false)
+
+- name: Authorise the placeholder key for the relay
+  ansible.builtin.copy:
+    content: "restrict {{ git_broker_placeholder_pub.content | b64decode | trim }}\n"
+    dest: "{{ git_broker_home }}/.ssh/authorized_keys"
+    owner: "{{ git_broker_user }}"
+    group: "{{ git_broker_user }}"
+    mode: '0600'
+  when: git_broker_enabled | default(false)
+  notify: Restart git broker
+
+# A non-default port makes sshd name the host between brackets.
+- name: Pin the broker host key in the agent zone
+  ansible.builtin.copy:
+    content: >-
+      [127.0.0.1]:{{ git_broker_ssh_port }}
+      {{ git_broker_host_pub.content | b64decode | trim | regex_replace('^(\S+ \S+).*$', '\1') }}
+    dest: "{{ git_broker_agent_known_hosts }}"
+    owner: "{{ git_broker_harness_name }}"
+    group: "{{ git_broker_harness_name }}"
+    mode: '0600'
+  when: git_broker_enabled | default(false)
+
+- name: Point the agent zone at the broker
+  ansible.builtin.blockinfile:
+    path: "{{ git_broker_agent_ssh_dir }}/config"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK git-broker"
+    block: "{{ lookup('ansible.builtin.template', 'harness-ssh-config.j2') }}"
+    create: true
+    owner: "{{ git_broker_harness_name }}"
+    group: "{{ git_broker_harness_name }}"
+    mode: '0600'
+  when: git_broker_enabled | default(false)
+
+# LFS derives its endpoint from the remote: this rewrite keeps the transfer on the loopback.
+- name: Declare the LFS endpoint rewrite in the agent zone
+  ansible.builtin.blockinfile:
+    path: "{{ git_broker_agent_gitconfig }}"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK git-broker"
+    block: "{{ lookup('ansible.builtin.template', 'harness-gitconfig.j2') }}"
+    create: true
+    owner: "{{ git_broker_harness_name }}"
+    group: "{{ git_broker_harness_name }}"
+    mode: '0644'
+  when: git_broker_enabled | default(false)
+
+- name: Enable the broker service
+  ansible.builtin.systemd_service:
+    name: "{{ git_broker_service_name }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  when: git_broker_enabled | default(false)
+
+- name: Flush handlers so the broker is checked as configured
+  ansible.builtin.meta: flush_handlers
+  when: git_broker_enabled | default(false)
+
+- name: Check that the SSH front listens on its loopback port
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ git_broker_ssh_port }}"
+    state: started
+    timeout: 60
+    msg: >-
+      Nothing listens on 127.0.0.1:{{ git_broker_ssh_port }}. Read 'journalctl -u
+      {{ git_broker_service_name }}': sshd refuses to start on a configuration it cannot read or
+      a privilege separation directory it cannot reach.
+  when: git_broker_enabled | default(false)
+
+# Run as the harness: only its own key, alias and pinned host key say anything about the agent's path.
+- name: Check that the agent zone reaches a declared repository
+  ansible.builtin.command:
+    cmd: "timeout 60 git ls-remote ssh://{{ git_broker_agent_ssh_alias }}/{{ git_broker_repo_paths[0] | regex_replace('^/', '') }}"
+  become: true
+  become_user: "{{ git_broker_harness_name }}"
+  environment:
+    HOME: "/home/{{ git_broker_harness_name }}"
+    GIT_TERMINAL_PROMPT: "0"
+  register: git_broker_lsremote
+  changed_when: false
+  failed_when: false
+  when: git_broker_enabled | default(false)
+
+- name: Assert that the deployment key was accepted
+  ansible.builtin.assert:
+    that:
+      - git_broker_lsremote.rc | default(1) == 0
+    fail_msg: >-
+      'git ls-remote' failed through the broker. Register the deployment key's public half as a
+      write deploy key on {{ git_broker_forge_ssh_host }}, check that this VM reaches its SSH port,
+      then read 'journalctl -u {{ git_broker_service_name }}' and 'journalctl -t git-broker'.
+  when: git_broker_enabled | default(false)
+
+# The refusal is the property: only the relay's own refusal proves a shell is unreachable, no failure.
+- name: Check that the broker refuses anything but git
+  ansible.builtin.command:
+    cmd: "ssh -o BatchMode=yes {{ git_broker_agent_ssh_alias }} id"
+  become: true
+  become_user: "{{ git_broker_harness_name }}"
+  environment:
+    HOME: "/home/{{ git_broker_harness_name }}"
+  register: git_broker_shell_refusal
+  changed_when: false
+  failed_when: >-
+    git_broker_shell_refusal.rc | default(0) == 0
+    or 'refused' not in (git_broker_shell_refusal.stderr | default(''))
+  when: git_broker_enabled | default(false)
+
+# --- disabled: restore the previous state, service and files included --------------
+
+- name: Stop and disable the broker service
+  ansible.builtin.systemd_service:
+    name: "{{ git_broker_service_name }}"
+    state: stopped
+    enabled: false
+  failed_when: false
+  when: not (git_broker_enabled | default(false))
+
+- name: Remove the broker systemd unit
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ git_broker_service_name }}.service"
+    state: absent
+  when: not (git_broker_enabled | default(false))
+
+# blockinfile refuses a path that does not exist, and a teardown runs after the files may be gone.
+- name: Check whether the agent zone configuration files exist
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: git_broker_agent_files
+  loop:
+    - "{{ git_broker_agent_ssh_dir }}/config"
+    - "{{ git_broker_agent_gitconfig }}"
+  when: not (git_broker_enabled | default(false))
+
+- name: Remove the agent zone SSH configuration block
+  ansible.builtin.blockinfile:
+    path: "{{ git_broker_agent_ssh_dir }}/config"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK git-broker"
+    state: absent
+  when:
+    - not (git_broker_enabled | default(false))
+    - git_broker_agent_files.results[0].stat.exists | default(false)
+
+- name: Remove the agent zone LFS rewrite block
+  ansible.builtin.blockinfile:
+    path: "{{ git_broker_agent_gitconfig }}"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK git-broker"
+    state: absent
+  when:
+    - not (git_broker_enabled | default(false))
+    - git_broker_agent_files.results[1].stat.exists | default(false)
+
+- name: Remove the agent zone placeholder key and its pinned host key
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ git_broker_agent_key }}"
+    - "{{ git_broker_agent_key }}.pub"
+    - "{{ git_broker_agent_known_hosts }}"
+  when: not (git_broker_enabled | default(false))
+
+# The key does not outlive the component that used it.
+- name: Remove the broker home
+  ansible.builtin.file:
+    path: "{{ git_broker_home }}"
+    state: absent
+  when: not (git_broker_enabled | default(false))
+
+- name: Remove the broker relay and its directory
+  ansible.builtin.file:
+    path: "{{ git_broker_root }}"
+    state: absent
+  when: not (git_broker_enabled | default(false))
+
+- name: Remove the broker configuration
+  ansible.builtin.file:
+    path: "{{ git_broker_config_dir }}"
+    state: absent
+  when: not (git_broker_enabled | default(false))
+
+- name: Remove the broker trust zone user
+  ansible.builtin.user:
+    name: "{{ git_broker_user }}"
+    state: absent
+    remove: true
+  when: not (git_broker_enabled | default(false))
+
+- name: Reload the systemd manager configuration
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: not (git_broker_enabled | default(false))

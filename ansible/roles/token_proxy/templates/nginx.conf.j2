@@ -1,0 +1,28 @@
+# Token injection proxy (Ansible Managed): the agent's loopback door to internal services.
+worker_processes 1;
+pid {{ token_proxy_runtime_dir }}/nginx.pid;
+error_log stderr notice;
+
+events {
+    worker_connections 128;
+}
+
+http {
+    server_tokens off;
+    # Location on the normalized URI, raw URI travelling: refuse '%25' and '%2e', keep '%2F' (GitLab).
+    map $request_uri $token_proxy_escaped_path {
+        default 0;
+        "~*^[^?]*%(2e|25)" 1;
+    }
+    access_log syslog:server=unix:/dev/log,facility=local7,tag={{ token_proxy_service_name | replace('-', '_') }},severity=info;
+    client_body_temp_path {{ token_proxy_runtime_dir }}/body;
+    proxy_temp_path {{ token_proxy_runtime_dir }}/proxy;
+
+    server {
+        listen 127.0.0.1:{{ token_proxy_port }};
+{% for entry in token_proxy_injections %}
+        # {{ entry.upstream }}
+        include {{ token_proxy_injection_dir }}/{{ loop.index }}.conf;
+{% endfor %}
+    }
+}

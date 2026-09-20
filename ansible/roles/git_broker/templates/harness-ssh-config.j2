@@ -1,0 +1,8 @@
+Host {{ git_broker_agent_ssh_alias }}
+    HostName 127.0.0.1
+    Port {{ git_broker_ssh_port }}
+    User {{ git_broker_user }}
+    IdentityFile {{ git_broker_agent_key }}
+    IdentitiesOnly yes
+    UserKnownHostsFile {{ git_broker_agent_known_hosts }}
+    StrictHostKeyChecking yes

@@ -1,0 +1,18 @@
+---
+token_proxy_enabled: false
+token_proxy_port: 8002
+token_proxy_service_name: token-proxy
+# The trust zone's shared uid: a component takes its own only for its own account shape (the relay).
+token_proxy_user: "{{ trust_zone_user | default(broker_name | default('broker')) }}"
+token_proxy_memory_max: "128M"
+token_proxy_nginx_binary: /usr/sbin/nginx
+token_proxy_stock_unit: nginx
+token_proxy_config_dir: /etc/token-proxy
+token_proxy_injection_dir: "{{ token_proxy_config_dir }}/injections"
+token_proxy_nginx_conf: "{{ token_proxy_config_dir }}/nginx.conf"
+token_proxy_runtime_dir: "/run/{{ token_proxy_service_name }}"
+# nginx wants a bundle as soon as it verifies an upstream: the one the system already trusts.
+token_proxy_ca_bundle: /etc/ssl/certs/ca-certificates.crt
+# One entry per internal service the agent must reach without holding its credential. Per entry:
+# locations, upstream, auth_header (TOKEN|TOKEN_B64), token_src, probe, allowed_methods, refused_paths, host_header, ca_src, max_body_size, read_timeout.
+token_proxy_injections: []

@@ -1,0 +1,27 @@
+# Token injection proxy (Ansible Managed)
+[Unit]
+Description=Token injection proxy ({{ token_proxy_service_name }})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ token_proxy_user }}
+Group={{ token_proxy_user }}
+RuntimeDirectory={{ token_proxy_service_name }}
+ExecStart={{ token_proxy_nginx_binary }} -c {{ token_proxy_nginx_conf }} -g 'daemon off;'
+Restart=always
+RestartSec=5
+MemoryMax={{ token_proxy_memory_max }}
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Its own runtime directory only: the uid it shares with the trust zone stays unreadable from here.
+ReadWritePaths={{ token_proxy_runtime_dir }}
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

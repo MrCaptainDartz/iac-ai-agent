@@ -5,10 +5,11 @@ agent_egress_harness_name: "{{ harness_name | default('hermes') }}"
 agent_egress_ruleset_path: /etc/nftables/agent-egress.nft
 agent_egress_service_name: agent-egress
 agent_egress_nft_binary: /usr/sbin/nft
-# Without this the agent reaches the provider directly, bypassing the gateway's alias table.
+# 22: the host's sshd, closed to the agent zone; then the provider's port, which would bypass the alias table.
 agent_egress_blocked_loopback_ports: >-
-  {{ [inference_gateway_upstream_url | default('http://127.0.0.1:11434') | urlsplit('port') | int]
-     if (inference_gateway_enabled | default(true)) else [] }}
+  {{ [22]
+     + ([inference_gateway_upstream_url | default('http://127.0.0.1:11434') | urlsplit('port') | int]
+        if (inference_gateway_enabled | default(true)) else []) }}
 agent_egress_log_prefix: "agent-egress-drop: "
 agent_egress_log_rate: "6/minute"
 agent_egress_log_burst: 12

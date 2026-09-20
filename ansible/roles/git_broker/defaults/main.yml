@@ -1,0 +1,131 @@
+---
+# --- component configuration ---
+
+git_broker_enabled: false
+git_broker_user: git-broker
+git_broker_home: "/var/lib/{{ git_broker_user }}"
+git_broker_service_name: git-broker-ssh
+git_broker_ssh_port: 2222
+git_broker_harness_name: "{{ harness_name | default('hermes') }}"
+git_broker_memory_max: "64M"
+git_broker_root: /opt/git-broker
+git_broker_bin_dir: "{{ git_broker_root }}/bin"
+git_broker_relay: "{{ git_broker_bin_dir }}/relay"
+git_broker_config_dir: /etc/git-broker
+git_broker_host_key: "{{ git_broker_config_dir }}/ssh_host_ed25519_key"
+git_broker_sshd_conf: "{{ git_broker_config_dir }}/sshd.conf"
+
+# --- the real forge over SSH ---
+
+# The deployment key: generated under output/ if absent — point it at a file of yours to supply one.
+git_broker_ssh_key_src: "{{ playbook_dir }}/output/git-broker.key"
+git_broker_ssh_key: "{{ git_broker_home }}/.ssh/forge"
+# Pinned: the forge's own known_hosts line, so the relay cannot be pointed at an impostor.
+git_broker_forge_host_key: ""
+git_broker_known_hosts: "{{ git_broker_config_dir }}/known_hosts"
+git_broker_forge_ssh_user: git
+git_broker_forge_ssh_host: ""
+git_broker_forge_ssh_port: 22
+# The only repositories the agent may reach, as the forge names them: owner/repo.git or owner/repo.
+git_broker_repos: []
+
+# --- the real forge over HTTP: the API and LFS, through the injection proxy ---
+
+# The forge token, for the API and LFS: a secret, so a file — the play checks it, never creates it.
+git_broker_token_src: "{{ inventory_dir }}/../files/git-broker.token"
+git_broker_api_upstream: ""
+git_broker_api_repo_prefix: "/api/v1/repos/"
+git_broker_api_auth_header: "Authorization: token TOKEN"
+# What the agent may do: read its repositories, and propose on pull requests and issues (PATCH edits or closes a PR).
+git_broker_api_read_methods: ["GET"]
+git_broker_api_proposal_methods: ["GET", "POST", "PATCH"]
+# A merge is a human gesture, not a proposal: closed unless declared, and then only where declared.
+git_broker_allow_merge: false
+# Repositories whose merge is admitted, as git_broker_repos names them; [] or ["*"] = all of them.
+git_broker_merge_whitelist: []
+# The forge's own authority, when it does not chain to a public one.
+git_broker_api_ca_src: ""
+git_broker_lfs_enabled: true
+# GitHub serves LFS on github.com while its API answers on api.github.com.
+git_broker_lfs_upstream: "{{ git_broker_api_upstream }}"
+# LFS wants Basic <base64(user:token)>: the same token file serves the API and LFS.
+git_broker_lfs_basic_user: ""
+git_broker_http_port: "{{ token_proxy_port | default(8002) }}"
+
+# --- derived: the forms the relay and the proxy consume ---
+
+git_broker_repo_paths: >-
+  {{ git_broker_repos
+     | map('regex_replace', '\.git$', '')
+     | map('regex_replace', '^/', '')
+     | map('regex_replace', '^', '/')
+     | map('regex_replace', '$', '.git')
+     | list }}
+# No trailing slash: the proxy then routes the endpoint the relay hands out, bare form included.
+git_broker_lfs_locations: "{{ git_broker_repo_paths | map('regex_replace', '$', '/info/lfs') | list }}"
+git_broker_api_repo_names: >-
+  {{ git_broker_repos
+     | map('regex_replace', '\.git$', '')
+     | map('regex_replace', '^/', '')
+     | list }}
+git_broker_api_read_locations: "{{ git_broker_api_repo_names | map('regex_replace', '^', git_broker_api_repo_prefix) | list }}"
+git_broker_api_proposal_locations: >-
+  {{ (git_broker_api_read_locations | map('regex_replace', '$', '/pulls') | list)
+     + (git_broker_api_read_locations | map('regex_replace', '$', '/issues') | list) }}
+# Reading a declared repository answers 200 only for a token that may read it.
+git_broker_api_probe: "{{ git_broker_api_read_locations[0] | default('') }}"
+# The repositories a merge may target: none while the flag is off, all when the list is empty.
+git_broker_merge_allowed: >-
+  {{ [] if not (git_broker_allow_merge | bool)
+     else (git_broker_api_repo_names
+           if (git_broker_merge_whitelist | length == 0 or '*' in git_broker_merge_whitelist)
+           else (git_broker_merge_whitelist
+                 | map('regex_replace', '^/', '') | map('regex_replace', '\.git$', '') | list)) }}
+# One regex per refused repository: a regex location wins over the prefix that admits the POST.
+git_broker_merge_refused: >-
+  {{ (git_broker_api_repo_names | difference(git_broker_merge_allowed)
+      | map('regex_replace', '^', git_broker_api_repo_prefix) | map('regex_escape')
+      | map('regex_replace', '^', '^') | map('regex_replace', '$', '/pulls/[0-9]+/merge$') | list) }}
+# One predicate for both halves: the relay that hands the endpoint out, the injection that serves it.
+git_broker_lfs_deployed: >-
+  {{ (git_broker_lfs_enabled | bool) and (git_broker_lfs_upstream | length > 0)
+     and (git_broker_token_src | length > 0) and (git_broker_repos | length > 0) }}
+
+# Injections for nginx configuration
+git_broker_injections: >-
+  {{ ([{'locations': git_broker_api_read_locations, 'upstream': git_broker_api_upstream,
+       'auth_header': git_broker_api_auth_header, 'token_src': git_broker_token_src,
+       'allowed_methods': git_broker_api_read_methods,
+       'probe': git_broker_api_probe, 'ca_src': git_broker_api_ca_src}]
+      if (git_broker_api_upstream | length > 0 and git_broker_token_src | length > 0
+          and git_broker_api_read_locations | length > 0) else [])
+     + ([{'locations': git_broker_api_proposal_locations, 'upstream': git_broker_api_upstream,
+          'auth_header': git_broker_api_auth_header, 'token_src': git_broker_token_src,
+          'allowed_methods': git_broker_api_proposal_methods, 'ca_src': git_broker_api_ca_src,
+          'refused_paths': git_broker_merge_refused}]
+        if (git_broker_api_upstream | length > 0 and git_broker_token_src | length > 0
+            and git_broker_api_proposal_locations | length > 0) else [])
+     + ([{'locations': git_broker_lfs_locations, 'upstream': git_broker_lfs_upstream,
+          'auth_header': 'Authorization: Basic TOKEN_B64', 'token_src': git_broker_token_src,
+          'basic_user': git_broker_lfs_basic_user, 'ca_src': git_broker_api_ca_src,
+          'allowed_methods': ['GET', 'POST', 'PUT'],
+          'host_header': '$proxy_host', 'max_body_size': 0, 'read_timeout': '3600s'}]
+        if git_broker_lfs_deployed | bool else []) }}
+
+# --- handed to the agent zone: addresses and a placeholder key, no credential ---
+
+git_broker_agent_ssh_dir: "/home/{{ git_broker_harness_name }}/.ssh"
+git_broker_agent_key: "{{ git_broker_agent_ssh_dir }}/id_ed25519_placeholder"
+git_broker_agent_known_hosts: "{{ git_broker_agent_ssh_dir }}/git_broker_known_hosts"
+git_broker_agent_ssh_alias: git-broker
+git_broker_agent_gitconfig: "/home/{{ git_broker_harness_name }}/.gitconfig"
+
+# The name the forge's LFS links carry: its LFS upstream's, never the SSH endpoint's. A third public name goes in git_broker_lfs_rewrite_extra.
+git_broker_lfs_link_host: "{{ git_broker_lfs_upstream | urlsplit('netloc') | default('', true) | trim }}"
+git_broker_lfs_rewrite_extra: []
+git_broker_lfs_rewrite_from: >-
+  {{ (['https://' ~ git_broker_agent_ssh_alias ~ '/',
+       'https://127.0.0.1:' ~ git_broker_http_port ~ '/']
+      + (['https://' ~ git_broker_lfs_link_host ~ '/', 'http://' ~ git_broker_lfs_link_host ~ '/']
+         if (git_broker_lfs_link_host | length) > 0 else [])
+      + git_broker_lfs_rewrite_extra) | unique | list }}

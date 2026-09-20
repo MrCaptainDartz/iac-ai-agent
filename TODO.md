@@ -81,7 +81,8 @@ Le socle d'isolation multi-couches est en place. **« Déployé » ne veut pas d
 │  │   • Gateway d'inférence  → provider, clé détenue (fait, Ph. 2)         │  │
 │  │   • Proxy egress L7      → internet, allowlist (fait, Ph. 3)           │  │
 │  │   • Broker Kubernetes    → kube-apiserver, jeton RO (fait, Ph. 4)      │  │
-│  │   • Broker git           → forge, token injecté (Phase 5)              │  │
+│  │   • Broker git           → forge, clé ré-originée (fait, Ph. 5)        │  │
+│  │   • Proxy d'injection    → API + LFS, jeton injecté (fait, Ph. 5)      │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -100,6 +101,8 @@ Le proxy L7 est la **brique d'adaptation** : elle permet de déclarer une politi
 8. **Gateway d'inférence** (`inference-gateway.service`) : porte d'entrée loopback portée par la **zone de confiance** (`broker`), table d'alias obligatoire — l'agent nomme un rôle, jamais un modèle du provider — et clé du provider détenue par le gateway. Le port amont du provider est fermé à la zone agent, donc le gateway est le seul chemin vers un modèle.
 9. **Proxy egress L7** (`egress-proxy.service`, `agent_egress_proxy_enabled`) : la **seule** sortie de la zone agent vers le web, allowlist déclarée par le déploiement, destinations internes refusées, une ligne de journal par requête. Le niveau 1 ne demande aucune CA ; le niveau 2 (interception TLS, opt-in) ajoute les chemins et l'inspection au prix de la distribution d'une CA interne.
 10. **Broker Kubernetes** (`k8s-broker.service`, `k8s_broker_enabled`) : le **seul** chemin de la zone agent vers un cluster, sous forme de `kubectl proxy` loopback porté par la zone de confiance, alimenté par un kubeconfig de ServiceAccount en lecture seule qui n'entre jamais dans la zone agent. L'agent reçoit une adresse (`127.0.0.1:8001`) et un `token: ignore` ; les méthodes d'écriture et les chemins `exec`/`attach`/`portforward`/`secrets` sont refusés par le proxy, et le jeton n'a aucun verbe d'écriture.
+11. **Broker git** (`git-broker-ssh.service`, `git_broker_enabled`) : le git **natif** de l'agent, sous une façade SSH loopback dont l'unique utilisateur a pour shell un relais qui **ré-origine** chaque session vers la forge avec la clé du déploiement. L'agent ne détient qu'une clé factice (`~/.ssh/id_ed25519_placeholder`, alias `git-broker`), et le relais refuse — en le journalisant — tout ce qui n'est pas un verbe git sur un dépôt déclaré.
+12. **Proxy d'injection** (`token-proxy.service`, `token_proxy_enabled`) : le **primitif** des credentials qui ne passent pas par du git — un nginx inverse loopback, sous l'uid de la zone de confiance, qui sert une **liste d'endpoints déclarée** en réécrivant l'en-tête d'authentification. Le broker git l'alimente (API de la forge : PR, statut CI ; et LFS), et le prochain service interne n'aura qu'à se déclarer.
 
 ---
 
@@ -115,7 +118,8 @@ Chaque composant est un rôle activable, dans le style existant.
 | Proxy egress L7 (niveau 1 : allowlist) | `agent_egress_proxy` | `agent_egress_proxy_enabled` | Brique d'adaptation |
 | Inspection TLS (niveau 2) | `agent_egress_proxy` *(même rôle)* | `agent_egress_proxy_tls_intercept` | Opt-in |
 | Broker Kubernetes (lecture seule) | `k8s_broker` | `k8s_broker_enabled` | Extension |
-| Broker git (propositions de PR) | `git_broker` | `git_broker_enabled` | Extension |
+| Broker git (branches, push, PR, LFS) | `git_broker` | `git_broker_enabled` | Extension |
+| Proxy d'injection de credential | `token_proxy` | `token_proxy_enabled` | Primitive, alimentée par les brokers |
 | Installation du harnais (provider livré) | `harness_hermes` | `harness_provider: hermes` | Phase 8, **à créer** |
 | Sécurisation du harnais (unité systemd) | `harness_service` | `harness_service_enabled` | Phase 8 |
 | Zone de confiance (utilisateur système) | `trust_zone` | `trust_zone_enabled` | Dépendance du gateway et des brokers |
@@ -167,7 +171,26 @@ k8s_broker_enabled: false           # broker Kubernetes en lecture seule, porté
 k8s_broker_port: 8001
 # Kubeconfig du ServiceAccount : un secret, donc un fichier hors dépôt, pas une variable.
 k8s_broker_kubeconfig_src: "{{ inventory_dir }}/../files/k8s-broker.kubeconfig"
+# --- Extension : broker git (transport SSH ré-originé) ---
 git_broker_enabled: false
+git_broker_ssh_port: 2222           # façade SSH loopback : l'agent garde un git natif
+git_broker_forge_ssh_user: git      # la même forme sur Forgejo, GitLab et GitHub
+git_broker_forge_ssh_host: ""
+git_broker_forge_ssh_port: 22       # ssh.github.com sert 443 quand 22 est filtré
+git_broker_repos: []                # les seuls dépôts atteignables : ["owner/repo.git"]
+git_broker_forge_host_key: ""       # la ligne known_hosts de la forge, épinglée (ssh-keyscan)
+# La clé de déploiement (écriture, scopée au dépôt) : un secret — générée sous output/ si absente.
+git_broker_ssh_key_src: "{{ playbook_dir }}/output/git-broker.key"
+# La moitié HTTP : l'API de la forge (PR) et LFS, servies par le proxy d'injection.
+git_broker_api_upstream: ""
+git_broker_api_repo_prefix: /api/v1/repos/   # GitLab : /api/v4/projects/ ; GitHub : /repos/
+git_broker_api_auth_header: "Authorization: token TOKEN"   # GitHub : Bearer ; GitLab : PRIVATE-TOKEN
+git_broker_lfs_enabled: true
+git_broker_lfs_basic_user: ""       # LFS attend Basic <base64(utilisateur:jeton)>
+git_broker_token_src: "{{ inventory_dir }}/../files/git-broker.token"
+# Le primitif : une liste d'endpoints à injecter, aucune connaissance d'une forge.
+token_proxy_enabled: false
+token_proxy_port: 8002
 
 # --- Harnais (Phase 8) : installation (provider) puis sécurisation ---
 harness_provider: "hermes"          # "hermes" (rôle livré) ou "none" (installation manuelle)
@@ -479,7 +502,7 @@ MemoryMax=<borne>
 | Sans `--network=host`, avec hostinet seul | **Son propre loopback** : `127.0.0.1:8001` est refusé. Le drop-in global n'ouvre donc rien par lui-même — c'est la moitié Podman du couple qui déplace la frontière, par conteneur et explicitement. |
 | `runsc network=host` (hostinet) | Delta d'isolation : les sockets du sandbox sont celles du **noyau de l'hôte** au lieu du netstack de gVisor — la doc gVisor le dit, ce mode « decreases the isolation to the host ». L'interposition des syscalls, elle, reste. **Et ce delta vaut même sans `--network=host`** : un conteneur dans son propre netns garde son loopback, mais ses paquets sont parsés par la pile du noyau — c'est une **surface d'attaque**, pas une joignabilité. D'où le défaut à `false`. |
 
-**Règle qui en découle.** Sous host networking, le loopback de la VM cesse d'être privé : c'est un domaine partagé avec la zone agent. Donc **tout nouveau service qui s'écoute en loopback doit soit figurer dans `agent_egress_blocked_loopback_ports`, soit authentifier ses appelants** — le port du provider (Phase 2) et le blocage DNS (Phase 1) en sont les deux instances actuelles, le broker et le proxy les portes assumées.
+**Règle qui en découle.** Sous host networking, le loopback de la VM cesse d'être privé : c'est un domaine partagé avec la zone agent. Donc **tout nouveau service qui s'écoute en loopback doit soit figurer dans `agent_egress_blocked_loopback_ports`, soit authentifier ses appelants** — le port du provider (Phase 2), le blocage DNS (Phase 1) et le port SSH de l'hôte en sont les trois instances actuelles, le broker et le proxy les portes assumées.
 
 **Risques résiduels, consignés :**
 
@@ -500,42 +523,181 @@ MemoryMax=<borne>
 | Table de checksums par architecture (amd64 **et** arm64) | Le projet **provisionne de l'amd64** (`ubuntu-26.04-server-cloudimg-amd64`), et `runsc` comme `uv` sont déjà figés en `x86_64`. Une table serait de la machinerie pour une plateforme que le dépôt ne déploie pas ; **une assertion** le dit en trois lignes, avec un message qui dit quoi faire. |
 | `apiGroups: ["*"]` pour couvrir les CRDs d'un coup | Refusé : cette règle lirait aussi **chaque futur CR** et chaque sous-ressource de chaque groupe, sans que le fichier ne le dise — alors que le RBAC est précisément le contrôle sur lequel ce design s'appuie. Le manifeste montre comment **nommer** ses groupes, et `apiextensions.k8s.io` donne déjà la carte des CRDs présents. |
 
-#### 🌟 Phase 5 — Broker git (propositions de PR)
+#### ✅ Phase 5 — Broker git (branches, push, PR, LFS) *(faite)*
 
-Généralisable à toute forge en HTTP (Forgejo/Gitea, GitLab…) ; l'injection est templatée par forge, car les formats d'authentification diffèrent.
+Cas d'usage : agent SRE. **Pas de MITM, pas de CA interne** — le harnais parle en clair à deux ports loopback, et la zone de confiance porte le transport autant que les credentials.
 
-- [ ] **Compte dédié sur la forge**, avec accès au **seul** dépôt visé. Indispensable : les PAT Forgejo/Gitea **ne se scopent pas par dépôt** — un token `write:repository` écrit dans *tous* les dépôts de son propriétaire. Le cloisonnement ne peut venir que du compte. Vérifier si la version supporte des tokens scopés finement, mais ne pas en dépendre.
-- [ ] Proxy d'injection en zone de confiance, loopback. **Attention au format d'authentification** : git attend du *basic*, l'API attend `token <...>` → deux `location` :
+**Le SSH déplace l'injection, il ne l'empêche pas.** Un proxy injecte en réécrivant une requête (l'en-tête `Authorization`) ; en SSH, l'authentification se joue *à l'intérieur* du canal chiffré : il n'y a rien à réécrire depuis l'extérieur. Le broker **termine** donc la session localement et la **ré-origine** avec la clé du déploiement — l'analogue exact de l'injection d'en-tête : le credential est injecté à la frontière, jamais porté par l'agent. Et c'est la forme **générique** : Forgejo, GitLab et GitHub servent tous le git en SSH sous la même forme (`user@host`, un port, une clé), là où le git HTTP change de chemin, de port et de politique selon la forge.
 
-```nginx
-server {
-    listen 127.0.0.1:<port>;
+**Deux composants, deux responsabilités.** `git_broker` est le **cas d'usage** (le transport, et la déclaration de ce dont il a besoin) ; `token_proxy` est le **primitif** — un nginx inverse sur loopback, sous l'uid de la zone de confiance, qui sert une **liste d'endpoints déclarée** et ne connaît ni forge ni git. Même séparation que §0 pose pour l'egress : un proxy configurable est le primitif, un broker est un cas d'usage. Le prochain service interne n'aura qu'à se déclarer.
 
-    # git (clone / fetch / push) — écrase tout Authorization entrant
-    location ~ ^/<owner>/<repo>\.git/ {
-        proxy_pass {{ git_broker_upstream }};
-        proxy_set_header Host {{ git_broker_host }};
-        proxy_set_header Authorization "Basic <base64(user:TOKEN)>";
-        proxy_ssl_trusted_certificate {{ git_broker_ca }};
-        client_max_body_size 0;        # sinon un push volumineux échoue (défaut : 1 Mo)
-        proxy_request_buffering off;
-        proxy_read_timeout 3600s;
-    }
+- [x] **Compte dédié, clé de déploiement en écriture, PAT minimal.** Le cloisonnement vient du credential : une **clé de déploiement est scopée au dépôt**, là où un PAT ne l'est pas — et les versions récentes de Forgejo savent en plus restreindre un jeton à des dépôts nommés, ce dont le design ne dépend pas.
+- [x] **Proxy d'injection générique** (`token_proxy`), loopback, zone de confiance, **liste déclarée** : l'API de la forge, et une entrée LFS par dépôt. Le format d'authentification est une ligne de la liste (`token TOKEN`, `Bearer TOKEN`, `PRIVATE-TOKEN: TOKEN`, `Basic TOKEN_B64`) — pas du code.
+- [x] **Terminateur SSH** (`git-broker-ssh.service`) : instance `sshd` dédiée, **loopback seul**, un utilisateur dont le **shell est le relais**. L'agent garde un git 100 % natif : `clone`, `checkout -b`, `commit`, `push`, `fetch`.
+- [x] **Zone agent sans credential** : clé **factice** (elle n'ouvre que le relais), alias SSH et `known_hosts` épinglés, règles `insteadOf` pour LFS. Aucun credential helper. `git+ssh` n'est pas proscrit : il est **ré-originé**.
+- [x] **Protection de branche** — le contrôle porteur, avec les réglages exacts : `enable_push` + `enable_push_whitelist` dont la liste blanche ne contient **que des humains**, force-push interdit, **tags protégés**, `push_whitelist_deploy_keys` laissé désactivé — et la *merge allowlist* (`enable_merge` + `enable_merge_whitelist`), parce que merger est une seconde porte vers le même endroit.
+- [x] **Le merge est un geste humain, donc le proxy le refuse par son nom** : `POST …/pulls/N/merge` était admis par la location préfixe qui porte les propositions, donc l'invariant ne tenait que par un réglage de forge — et la recette de protection de branche seule ne le produisait pas. Fermé par défaut (`git_broker_allow_merge: false`) sous la forme d'une **location regex par dépôt refusé**, portée par l'entrée proposition sous la clé générique `refused_paths` : une regex gagne sur un préfixe, donc elle intercepte avant lui, sans toucher au `POST /pulls` (création de PR). `git_broker_merge_whitelist` (`[]` ou `["*"]` = tous) restreint l'ouverture par dépôt, et une entrée qui n'est ni `*` ni un dépôt déclaré **échoue le play** au lieu de construire un garde qui ne matcherait jamais. Périmètre : Forgejo/Gitea, où le merge est un `POST` ; sur GitHub/GitLab c'est un `PUT`, déjà hors des verbes déclarés.
+- [x] **L'assertion tient ce qu'elle annonce** : elle comparait les noms de dépôts, pas les **locations dérivées** — `["a/b", "a/b/pulls"]` passait, puis produisait deux `location =` identiques et nginx refusait de démarrer (reproduit au rendu : 2 doublons sur 16 locations). Elle compare désormais l'union lecture / proposition / LFS, valide la whitelist de merge, et exige que `git_broker_repos` et `git_broker_merge_whitelist` soient bien des **listes** (`type_debug`) : une chaîne passait — itérée caractère par caractère — et donnait au relais une liste d'autorisation d'un dépôt par lettre (`/o.git`, `/w.git`…), sans que rien ne le signale.
+- [x] **LFS** servi par le même proxy, avec l'endpoint obtenu par `git-lfs-authenticate` (voir le tableau). **Un seul prédicat dérivé** (`git_broker_lfs_deployed`) décide si le relais rend l'endpoint *et* si l'injection le sert : deux conditions jumelles divergeaient, et `lfs_enabled: false` avec une API déclarée faisait rendre une adresse morte (404) au lieu d'un refus.
+- [ ] **Validation en CI sur la PR** (`kustomize build`, `kubeconform`, `conftest`/OPA, en statut requis) : **reste dehors** — c'est le dépôt GitOps du déploiement, pas du broker.
+- [ ] **Interdire la modification du pipeline lui-même** : **reste dehors**, même raison — c'est une seconde règle de protection de branche côté forge.
 
-    # API (PR, issues, statut CI)
-    location /api/ {
-        proxy_pass {{ git_broker_upstream }}/api/;
-        proxy_set_header Host {{ git_broker_host }};
-        proxy_set_header Authorization "token <TOKEN>";
-        proxy_ssl_trusted_certificate {{ git_broker_ca }};
-    }
-}
-```
+**Ce que la reconnaissance a établi** (mesuré sur la VM, deux `sshd` scratch en loopback, aller-retour git réel) :
 
-- [ ] Config git de la zone agent : remote vers le proxy loopback, **aucun credential helper**, **aucune clé SSH** dans le home — `git+ssh` est à proscrire, aucun proxy L7 ne peut intercepter SSH (l'authentification se fait *à l'intérieur* du canal chiffré). Le harnais garde un `git` 100 % natif : `clone`, `checkout -b`, `commit`, `push`.
-- [ ] **Protection de branche** — c'est le contrôle porteur de tout le design, il tient même si l'agent contourne le proxy : PR obligatoire, approbation obligatoire, push direct interdit, force-push interdit. Protéger aussi les tags.
-- [ ] **Validation en CI sur la PR** : `kustomize build`, `kubeconform`, `conftest`/OPA, en statut requis. Le gate est dans la CI, pas dans un script broker.
-- [ ] Interdire la modification du pipeline lui-même (workflows CI, bootstrap GitOps, manifests RBAC) sans revue supplémentaire — sinon un PR mergé escalade en modifiant le déploiement.
+| Supposé | Réel |
+|---|---|
+| `SSH_ORIGINAL_COMMAND` porte la commande | **Faux** : cette variable n'est posée que si une commande *forcée* est configurée. Quand le shell de l'utilisateur **est** le relais, sshd exécute `<shell> -c <commande>` et la commande arrive en **`argv[2]`** — c'est pourquoi `git-shell` lit `argv[2]`. Un relais qui lit la mauvaise variable refuse *tout*, git légitime compris (mesuré : `SAW: []`). |
+| Le shell peut être un script absent de `/etc/shells` | **Oui** : sshd l'exécute, `/etc/shells` ne le concerne pas. |
+| Un compte sans mot de passe (`shadow: !`) se connecte par clé | **Seulement avec `UsePAM yes`** : avec `UsePAM no`, sshd refuse (« account is locked »). L'utilisateur de la zone de confiance est créé sans mot de passe — le réglage est obligatoire. |
+| Un relais d'octets préserve git | **Oui** : `ls-remote`, `clone`, `checkout -b`, `commit`, `push` (branche créée côté amont), puis `fetch` en seconde session. |
+| Ce que git envoie | `git-upload-pack '/chemin'` / `git-receive-pack '/chemin'` — verbe + chemin **entre guillemets simples** ; et `git-lfs-authenticate /chemin upload`, **sans** guillemets. D'où un relais qui découpe `argv[2]` et retire les guillemets, plutôt qu'un motif regex. |
+| `restrict` dans `authorized_keys` | **Honoré** : « PTY allocation request failed on channel 0 ». |
+| Les refus sont exploitables | `logger -t git-broker` → lisibles dans le journal (`refused: …`) : c'est la matière de la Phase 7. |
+| La porte d'admin réutilisable | **Non** : `AllowUsers ubuntu hermes` — le compte de confiance n'y est pas admis, et l'y ajouter lierait deux rôles. D'où l'instance dédiée. |
+| `insteadOf` suffit pour ramener LFS sur le loopback | **Faux** : `git lfs env` montre que l'endpoint *batch* déduit du remote n'est **pas** réécrit (`Endpoint=https://git-broker/…`), alors que `lfs.url` l'est. Et `lfs.url` est global — il ne vaut que pour un dépôt. |
+| Le relais doit répondre `git-lfs-authenticate` | **Oui, et c'est la voie propre** : git-lfs appelle bien le serveur SSH, **et** il utilise le `href` renvoyé — mesuré, la requête batch est arrivée sur un listener local et non sur la forge, **sans en-tête `Authorization`** (`auth=None`), donc c'est le proxy qui l'injecte. La réponse ne contient qu'une adresse. |
+| Le transfert LFS en SSH pur (`git-lfs-transfer`) | **Refusé par le relais, et git-lfs se replie seul** sur le HTTP : c'est le comportement voulu, et la porte reste à un seul verbe. |
+| `blockinfile state=absent` sur un fichier absent | **Échoue** (« Path … does not exist ») : les retraits du bloc `disabled` sont gardés par un `stat`. |
+| OpenSSH 10 | `PerSourcePenalties crash:90 authfail:5 min:15 max:600` **par défaut** : sur une instance dont le seul client est la VM, cinq échecs d'authentification banniraient le harnais de son propre broker → `PerSourcePenalties no`, justifié. |
+
+**Ce que la vérification a établi** (rôles déployés sur la VM, aller-retour git et LFS réels, puis démontage) :
+
+| Vérifié | Mesure |
+|---|---|
+| La session SSH tourne sous l'uid de la zone de confiance | `session opened for user git-broker(uid=994) by git-broker(uid=0)` — le démon sshd est root, c'est la seule façon de baisser les privilèges ensuite |
+| Le git reste natif | `clone`, `checkout -b`, `commit`, `push` → la branche existe côté amont. **Les trois formes de l'URL** clonent : `ssh://git-broker/dépôt.git`, `git-broker:dépôt.git` et `git-broker:dépôt` |
+| **LFS, de bout en bout** | `Uploading LFS objects: 100% (1/1), 500 KB` puis `PUT …/objects/<oid>` **et** `GET …/objects/<oid>` (500 000 octets) reçus par l'amont avec `auth=Basic …` **injecté** : le `Host` transmis ramène les URL de transfert sur le loopback, et le clone frais rend un fichier dont le sha256 **est** l'oid poussé |
+| Refus | shell, dépôt non déclaré, et les **deux formes d'injection** (`… ; touch /tmp/pwned`, `… --upload-pack=/tmp/pwned`) refusés, **une ligne par refus** dans le journal, et aucune commande exécutée |
+| **La porte HTTP est bornée** | `GET` sur le dépôt déclaré → 200 ; `POST …/pulls` → 200 ; `DELETE …/<dépôt>` et `POST …/hooks` → **403 sans jamais atteindre l'amont** (journal de la forge) ; `/api/v1/user/keys` et un autre dépôt → **404**. Postérieur à cette passe : `PATCH` admis sur la proposition, emplacements **bornés** (chemin exact + sous-arbre), chemin échappé refusé, `X-HTTP-Method-Override` vidé — forme **rendue puis validée par `nginx -t`**, pas redéployée |
+| Aucun credential côté agent | clé de déploiement, bloc d'injection et clé d'hôte illisibles ; seuls `authorized_keys` et `config` subsistent dans son `.ssh` |
+| Fail-closed | broker arrêté → le git de l'agent échoue ; redémarré → les références |
+| Conteneur | `{"login": "agent-sre"}` depuis un conteneur, avec **et** sans `--network=host` (le `netns=host` global rend le second inutile) |
+| Idempotence | `changed=3`, les trois tâches préexistantes (lever du filtre, `nvm` npm, réapplication du ruleset) — **aucune** du broker |
+| Démontage | unités, utilisateur, arborescences, clé factice, `known_hosts` et les deux blocs balisés retirés ; `nginx` laissé masqué ; socle intact (`8001` seul écouteur, broker Kubernetes actif) |
+| Redémarrage | unités actives, écouteurs en place, filtre d'egress **chargé**, `ls-remote` et sonde d'API OK, shell toujours refusé |
+
+**Vérification sur la forge réelle** (Forgejo derrière Traefik, CA interne, compte dédié, premier déploiement) :
+
+| Vérifié | Mesure |
+|---|---|
+| Le transport, sous l'uid du harnais | `clone` OK, branche poussée, et la forge propose sa PR ; `ls-remote` déjà assuré par le contrôle d'effet du rôle |
+| **La protection de branche tient** | `git push origin HEAD:refs/heads/main` → `remote: Forgejo: Not allowed to push to protected branch main` puis `! [remote rejected] HEAD -> main (pre-receive hook declined)`. C'est *la* propriété du design, et elle est mesurée sur la forge |
+| **LFS de bout en bout, sur la forge réelle** | objet de 1 Mio : le blob dans le dépôt est un **pointeur** (`version https://git-lfs.github.com/spec/v1`), un clone frais rend **1 048 576 octets** et un **sha256 identique** ; le journal du proxy porte `objects/batch`, le `PUT …/objects/<oid>/1048576` et le `GET` du clone. La réécriture du **nom de la forge** (celle jamais mesurée) porte donc bien le transfert |
+| La porte HTTP | sonde `GET /api/v1/repos/<dépôt>` → **200** ; `DELETE` le dépôt → **403** ; `/api/v1/user/keys` → **404** ; un nom qui allonge le dépôt déclaré → **404** ; chemin doublement encodé → **403** |
+| Les refus du relais | shell et dépôt non déclaré → `git-broker: refused`, **15 refus** journalisés |
+| La zone agent n'a aucun chemin direct | HTTPS direct → échec ; 2222 direct → bloqué. Les deux seules portes sont `127.0.0.1:2222` et `127.0.0.1:8002` |
+| Les unités | `token-proxy` sous l'uid **broker**, les deux écouteurs en loopback seul, `agent-egress` actif |
+
+**Deux constats de cette vérification.**
+
+1. **Les tags n'étaient pas protégés, et c'était mesuré** : `git push origin HEAD:refs/tags/…` était **accepté** (la branche, elle, refusée) — le risque 7 n'était donc pas théorique, un tag poussé par l'agent pouvait déclencher un pipeline de déploiement. **Fermé côté forge et re-mesuré** : le déploiement a restreint les tags à son compte, et la même poussée rend désormais `remote: Forgejo: Tag agent-sre-test is protected` puis `! [remote rejected] … (pre-receive hook declined)`, `main` restant refusé de la même façon.
+2. **Un 403 transitoire de la forge sur `locks/verify`**, au premier `git push` LFS : git-lfs abandonne (fail-closed, rien de partiel), et le même appel répond ensuite `200 {"ours":[],"theirs":[]}` — les deux tentatives suivantes passent. Cause la plus probable : le cache de permissions de Forgejo sur un collaborateur fraîchement ajouté. Ce n'est pas le proxy : son journal montre la requête transmise. À savoir si ça se reproduit : **réessayer**, pas chercher côté broker.
+
+**Trois défauts, tous dans le code de cette phase, tous trouvés par la mesure** :
+
+1. `CapabilityBoundingSet` **sans `CAP_SYS_CHROOT`** → `chroot("/run/sshd"): Operation not permitted` : la séparation de privilèges d'`sshd` ne peut pas s'établir, et la session meurt avant le relais. Toute unité `sshd` durcie a besoin de cette capacité.
+2. `server_tokens` au contexte **main** de nginx → le démon refuse de démarrer : la directive n'est permise que dans `http`, `server` ou `location`.
+3. **`index_var` d'Ansible est 0-based** quand `loop.index` de Jinja est 1-based : la configuration incluait `1.conf`/`2.conf` pendant que le rôle écrivait `0.conf`/`1.conf`. Le nettoyage supprime désormais tout index hors de la plage déclarée, **dans les deux sens** (une liste qui rétrécit ne doit pas laisser un jeton derrière un index que la config n'inclut plus).
+
+**Revue de code de cette phase : ce que la mesure a confirmé, corrigé ou écarté.**
+
+| Constat | Mesure | Suite |
+|---|---|---|
+| nginx refuse de démarrer sans `proxy_ssl_trusted_certificate` dès que `proxy_ssl_verify on` | **Confirmé** : `[emerg] no proxy_ssl_trusted_certificate for proxy_ssl_verify` (nginx 1.28.3). Le premier test ne l'avait pas vu : la forge locale déclarait un `ca_src`, donc la branche fautive n'était jamais rendue. | **Corrigé** : sans `ca_src`, l'entrée pointe le faisceau système (`token_proxy_ca_bundle`) — le cas GitHub/Let's Encrypt. |
+| Un jeton contenant `$` casse la configuration | **Confirmé** : `unknown "cd" variable`, nginx refuse de démarrer — et `$` **ne s'échappe pas** dans une valeur de directive. | **Corrigé** : l'assertion de la liste exige un jeton d'une ligne et sans `$` — le `"` et l'antislash sont désormais **échappés** par le template, donc admis (cf. 5e passe). |
+| `CapabilityBoundingSet` bloque `pam_loginuid.so` | **Réfuté** : `/etc/pam.d/sshd` contient bien `session required pam_loginuid.so`, et 38 sessions se sont ouvertes sous l'uid du broker avec `CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_SYS_CHROOT`. | Rien à changer : ajouter `CAP_AUDIT_CONTROL` élargirait la boîte à outils d'un démon exposé, sans cause mesurée. |
+| `/run/sshd` doit exister au démarrage | **Confirmé deux fois** : systemd **ne crée pas** un `ReadWritePaths` absent (`Failed at step NAMESPACE`, `status=226`), et c'est la propre unité `ssh.service` (`RuntimeDirectory=sshd`) qui crée le répertoire — le rôle en dépendait implicitement. | **Corrigé** : le rôle crée `/run/sshd` (0755 root:root, idempotent) et le laisse en place au démontage — `RuntimeDirectory` l'aurait **supprimé** à l'arrêt, cassant les sessions *neuves* de l'administrateur. |
+| Le relais ré-émet la commande brute de l'agent | **Confirmé, et c'était le trou** : `set -- $cmd` ne vérifiait ni le nombre d'arguments ni leur forme, et `exec ssh … "$cmd"` rejouait la chaîne entière. Mesuré sur la logique du relais : `git-upload-pack '/dépôt' ; touch /tmp/pwned` et `… --upload-pack=/tmp/pwned` étaient **acceptés** puis transmis. | **Corrigé** : nombre d'arguments exact par verbe, `set -f`, et la commande est **reconstruite** depuis le dépôt canonique retenu. Vérifié de bout en bout. |
+| Le relais refuse la syntaxe `scp` | **Confirmé** : `git clone git-broker:dépôt` (sans slash, ou sans `.git`) était refusé — un piège pour un agent qui écrit l'URL naturelle. | **Corrigé** par le même changement : le chemin est normalisé avant comparaison, l'amont reçoit la forme canonique. |
+| L'API HTTP est ouverte à tout le compte | **Confirmé par construction** : le PAT porte l'autorité du compte (Forgejo n'a pas de jeton scopé à un dépôt), donc `DELETE /api/v1/repos/<le mien>` détruisait le dépôt et `POST …/hooks` ouvrait une exfiltration permanente. | **Corrigé** : les chemins routés sont **dérivés des dépôts déclarés** et les verbes bornés (`git_broker_api_read_methods` / `_proposal_methods`). Mesuré : 403 pour `DELETE` et `…/hooks`, jamais vus par l'amont. |
+| `Host: $http_host` casse une forge à hôte virtuel | **Confirmé sur la forge réelle** : elle est derrière **Traefik**, qui ne répond qu'au nom — l'entrée LFS transmettait donc un `Host` que le frontal ne route pas. | **Corrigé** : les deux entrées HTTP présentent le nom de l'amont. Les liens d'objet arrivent alors avec ce nom, et la liste de réécriture les ramène au proxy (mécanisme mesuré ; la forme « forge servie en direct » reste couverte par la même liste). |
+| GitHub sert LFS ailleurs que son API | **Confirmé** : `api.github.com` n'est pas `github.com`. | **Corrigé** : `git_broker_lfs_upstream` (défaut : l'amont d'API). |
+| La réécriture LFS ne couvre pas l'hôte demandé | **Confirmé, et c'est ce qui faisait échouer le *pull*** : la forge construisant ses liens depuis l'hôte de la requête, ils arrivent en `https://127.0.0.1:8002/…` alors que la liste ne réécrivait que `https://<forge>/`. La poussée passait, le clone retombait sur du TLS. | **Corrigé** : les trois bases possibles (alias, nom de la forge, endpoint loopback **avec son port**) sont réécrites dans une seule section `[url]`. Vérifié : aller-retour complet, sha identiques. |
+| `token_proxy` absent de `trust_zone_dependent_units` | **Confirmé** : il tourne sous l'uid **partagé** de la zone de confiance — `userdel` échouerait si les deux rôles étaient désactivés dans le même play. | **Corrigé** : ajouté à la liste (le broker git a son propre uid : rien à y faire). |
+| LFS vers un stockage objet (S3/MinIO) est hors d'atteinte | **Confirmé** : les URL pré-signées pointent ailleurs, et le filtre d'egress de la zone agent ne laisse que le loopback. | **Écarté** comme correctif : ce n'est pas le broker mais l'egress — la composition est de déclarer le stockage dans `agent_egress_proxy_allowlist` (README). |
+
+Écarté faute de risque établi : **filtrer `GIT_PROTOCOL`** — la valeur est interprétée par le git de la forge, une valeur malformée ne dégrade que la session de l'agent (et la CVE citée à l'appui concerne les sous-modules, pas cette variable).
+
+**Deuxième passe de revue : ce que la mesure a confirmé, corrigé ou écarté.** (Bancs nginx locaux sur la VM : correspondance d'emplacement, URI brute contre normalisée, cgroup ; rendu des entrées réelles puis `nginx -t`.)
+
+| Constat | Mesure | Suite |
+|---|---|---|
+| `location /api/v1/repos/<dépôt>` : un préfixe **nu** route aussi tout dépôt dont le nom *commence* par celui-ci | **Confirmé — et c'est une fuite de lecture inter-dépôts** : banc, `GET /api/v1/repos/owner/repo-backend/contents/.env` → **200**, servi par l'emplacement de `owner/repo`. La mesure du tableau précédent (« un autre dépôt → 404 ») portait sur un nom **sans préfixe commun** : elle ne couvrait pas ce cas. | **Corrigé** : chaque chemin déclaré est émis **exact** (`location = <chemin>`, la forme que la sonde appelle) **et** en sous-arbre (`location <chemin>/`). Banc : la forme nue laisse passer, la forme bornée rend **404** sur le nom étendu, 200 sur le chemin exact et sur son sous-arbre, et **404** sur `%2D` (nginx décode avant de choisir l'emplacement). L'entrée LFS, déjà terminée par `/`, était indemne. |
+| La décision porte sur l'URI **normalisée**, l'URI **brute** part vers l'amont | **Confirmé** : banc, `GET /e/api/%252e%252e%252fadmin` arrive à l'amont **tel quel**, alors que l'emplacement a été choisi sur la forme normale — une chaîne autorisée peut donc en dire une autre chez un amont qui décode deux fois. | **Corrigé, mais pas par le correctif proposé** (voir la ligne suivante) : un `map` sur `$request_uri` refuse (**403**) les échappements qui peuvent dire autre chose à l'amont, dans ces emplacements. Mesuré : chemins légitimes 200, échappés 403, et une **query string** gardant son `%2C` reste admise (le motif s'arrête au `?`). *(Le périmètre exact du refus a été **resserré** à la 3e passe : voir plus bas — la première version refusait **tout** `%`, ce qui fermait la moitié HTTP GitLab.)* |
+| Durcir en transmettant `$uri` (`proxy_pass https://<amont>$uri$is_args$args`) | **Réfuté, et ce serait pire** : `$uri` est **décodée une fois** — banc, `GET /n/api/one%20two` **n'atteint jamais** le gestionnaire (l'espace littéral casse la ligne de requête, aucune trace côté amont), et un `%2F` deviendrait un séparateur de chemin, c'est-à-dire l'inverse d'une borne. | Écarté au profit du refus ci-dessus, plus petit (un `map` et une ligne par emplacement) et sans changer la forme transmise aux amonts. |
+| Le jeton « nginx traite `` ` `` comme un échappement, même entre guillemets » | **Réfuté** : `nginx -t` accepte la configuration, et l'amont reçoit ``tok`en`` **inchangé** — comme `tok\en` et `a;b{c}d`. Les deux seuls caractères que nginx donne à une valeur de directive sont `$` (variable) et `"` (fin de valeur), **déjà** interdits par l'assertion. | Rien à resserrer : la classe proposée refuserait des jetons valides sans rien fermer de plus. |
+| L'entrée de lecture `GET` est redondante avec le SSH et élargit à tout le préfixe : hooks, collaborateurs, noms des secrets CI, logs de jobs | **Confirmé** : tous ces chemins sont sous le préfixe routé, et l'agent lit déjà le **contenu** du dépôt par `git-upload-pack`. Les logs de jobs contiennent régulièrement des secrets partiellement masqués. | **Décision du déploiement : garder**, et l'inscrire comme élargissement assumé (risque 12) — le README le dit désormais au lieu de laisser croire que « rien d'autre » n'est routé. |
+| Le composant qui parse des réponses de l'amont tourne sous l'uid **partagé** de la zone de confiance | **Confirmé** : c'est le seul composant joignable depuis la zone agent à partager l'uid qui détient les clés du gateway, la CA du proxy L7 et le jeton SA du cluster. Le broker git, lui, a le sien. | **Décision du déploiement : garder l'uid partagé** — le broker git a son propre compte *parce qu'il a besoin de son script comme shell*, pas par règle générale. Compensation : le `ReadWritePaths` du proxy ne contient plus que son répertoire d'exécution, l'uid partagé ne lui donne donc plus l'écriture dans le home commun. |
+| `MemoryMax=64M` bornerait une session relayée au point de casser un clone volumineux | **Réfuté** : banc, 1 Gio (8192 × 128 Kio) traversés dans un cgroup `MemoryMax=64M` → **pic 6,8 Mio**, `Result=success`. Un flux ne s'accumule pas : la borne est un plafond de **concurrence**, pas de taille. | Rien à changer, la valeur reste — désormais avec la mesure. `MaxSessions` vaut 10 **par connexion** (mesuré) : l'ajouter ne bornerait pas un agent qui ouvre plusieurs connexions, donc n'apporterait rien. |
+| Le journal d'accès n'a pas de rotation, et c'est l'agent qui pilote le volume | **Confirmé** — et ce fichier était le seul du dépôt : partout ailleurs la trace va au journal, borné par journald. | **Corrigé** : `access_log syslog:` → journal de l'unité (**mesuré** sous les directives de bac à sable du rôle : la ligne atterrit dans `journalctl -u token-proxy`). Le répertoire de logs, sa tâche et son entrée `ReadWritePaths` **disparaissent**. Contrepartie assumée : sous inondation journald écrête au lieu de remplir le disque. |
+| Les en-têtes du client traversent tels quels | **Confirmé** : `X-HTTP-Method-Override: DELETE` envoyé par le client arrive à l'amont sous un `POST` pourtant autorisé ; avec `proxy_set_header … ""`, il est **retiré**. | **Corrigé** : l'en-tête est vidé sur chaque entrée — un verbe que l'amont pourrait honorer depuis un en-tête n'est pas le verbe que `limit_except` a admis. |
+| Un amont `http://` enverrait le jeton injecté en clair | **Confirmé par lecture** : l'assertion ne portait que sur la longueur, et `proxy_ssl_verify on` serait devenu un no-op silencieux. | **Corrigé** : l'assertion exige `https://`. |
+| `git_broker_user: root` (ou le compte d'administration) passe l'assertion | **Confirmé** : le motif `^[a-z0-9-]+$` l'accepte, puis la tâche `user` remplace son shell par le relais et son home par celui du broker — lockout sans console, la panne pour laquelle le README a une section dédiée. | **Corrigé** : `root` et `ansible_user` sont exclus, le motif est rappelé dans le message. |
+| `git_broker_repos` n'est validé ni en forme ni en unicité | **Confirmé** : un espace ou une apostrophe casse le `join(' ')` du relais et le quoting de la commande amont ; et deux entrées qui normalisent vers le même chemin produisent **deux fois le même `location`** — banc : `[emerg] duplicate location "/a/b"`, nginx refuse de démarrer, donc le proxy **entier** tombe. | **Corrigé** : assertion de forme (`[A-Za-z0-9._/-]`) et d'unicité après normalisation (`/` de tête et `.git` retirés), avec les deux effets dans le message. |
+| Le test « le shell est refusé » passe pour **n'importe quel** échec (`failed_when: rc == 0`) | **Confirmé** : une pénalité d'authentification ou une connexion refusée aurait suffi à « prouver » la propriété. | **Corrigé** : le test exige `refused` dans la sortie d'erreur — le refus doit être **celui du relais**, pas celui de sshd. |
+| Les bases de réécriture LFS se déduisent de l'hôte **SSH** | **Confirmé** : les liens portent le nom **HTTP**, celui que le proxy présente. Dès que les deux diffèrent (`ssh.github.com`, un nom git-ssh dédié), aucune base ne matchait — LFS cassé, mais fail-closed. | **Corrigé** : la base utile est dérivée de `git_broker_lfs_upstream` (`urlsplit('netloc')`, donc le nom **et** le port que `$proxy_host` présente), plus `git_broker_lfs_rewrite_extra` pour une forge dont le nom public est un troisième ; l'alias et l'endpoint loopback restent. |
+| Un push peut faire exécuter du CI côté forge | **Confirmé par construction** : une branche neuve n'est pas protégée, donc un `.forgejo/workflows/` modifié y fait tourner un runner — machine hors de la zone agent, avec son propre egress et souvent les secrets du dépôt. | **Inscrit côté forge** (README, « On the forge ») : protéger les chemins de workflow comme `main`, ou tenir les secrets hors des runs qu'un acteur non listé peut déclencher. C'est la voie d'escalade du verbe push, et elle appartient à la forge. |
+
+**Troisième passe de revue.** (Banc nginx : la porte GitLab encodée, le garde resserré, les cas de forme des dépôts.)
+
+| Constat | Mesure | Suite |
+|---|---|---|
+| **Le refus de tout `%` ferme la moitié HTTP GitLab**, que le README et l'exemple documentent | **Confirmé, et c'était une régression de la 2e passe** : GitLab exige le chemin encodé sur un segment (`NAMESPACE/PROJECT_PATH`, `/` en `%2F`). Sous le refus global, `/api/v4/projects/group%2Fproject` → **403**, et la même requête non encodée → **404** chez GitLab : les deux portes fermées. | **Corrigé** : le `map` ne refuse plus que `%(2e|25)`, donc `%2F` repasse. Banc : `/api/v4/projects/group%2Fproject`, son sous-arbre et sa query → **200**, l'amont recevant la forme **encodée** qu'il attend ; `%252e%252e%252f` → **403** ; `%2e%2e` → **404** (nginx résout la traversée **avant** de choisir l'emplacement, la clause `%2e` est donc une ceinture qui ne coûte rien : aucun chemin légitime n'encode un point) ; le dépôt dont le nom allonge reste **404**. README et commentaire du template disent maintenant **la même chose**, `%2F` nommé. |
+| L'assertion d'unicité rate le **slash final**, et c'est le cas qui tue nginx | **Confirmé** : `["owner/repo", "owner/repo/"]` passait pour deux noms distincts, mais produisait **deux fois** `location /api/v1/repos/owner/repo/` — la forme sous-arbre du premier, la forme préfixe du second — soit exactement la panne que l'assertion prétend empêcher. | **Corrigé des deux côtés** : `/` final rejeté par le test de forme (il donne aussi `/owner/repo/.git` au relais, qui ne matche aucun dépôt) **et** `/+$` ajouté à la chaîne de déduplication, pour que l'assertion soit correcte en elle-même. Les six cas de banc repassent. |
+| Le nouveau visage HTTP n'avait jamais été déployé de bout en bout | **C'était exact au moment de la 3e passe** : borne, garde d'échappement et `X-HTTP-Method-Override` validés par banc et par `nginx -t` sur le fichier rendu seulement. | **Fait et mesuré sur la forge réelle le 19/09** (voir le tableau de vérification ci-dessus) : `ls-remote`, clone/push, **aller-retour LFS complet** avec objet de 1 Mio, sonde 200, `DELETE` 403, frère par préfixe 404, `%252e` 403, refus du shell. L'effet du garde `%` sur LFS n'est donc plus du raisonnement : les chemins LFS ne portent ni `%2e` ni `%25`, et le transfert est passé. |
+
+**Quatrième passe de revue.** Un seul constat, et c'est une lacune de **documentation**, pas de code : le garde resserré rouvre GitLab pour l'agent, mais pas pour le **contrôle d'effet** du rôle. La sonde est dérivée de `git_broker_api_read_locations[0]`, que le commentaire fait déclarer en forme **décodée** — or la sonde est une **requête**, là où un emplacement est un **motif** : GitLab répond 404 sur la forme non encodée (« `NAMESPACE/PROJECT_PATH` … `/` is represented by `%2F` »), donc sur un déploiement GitLab correct le play s'arrêtait sur « Assert that the injected credential is accepted », avec un message envoyant chercher du côté du jeton ou de l'amont.
+
+| Constat | Mesure | Suite |
+|---|---|---|
+| La sonde dérivée n'est pas la bonne **forme** sur une forge qui encode ses chemins | **Confirmé par lecture** (le message, lui, était le vrai défaut : il accusait le jeton). Le remède existait — l'override `git_broker_api_probe` est juste au-dessus — mais rien ne disait lequel écrire. | **Documenté** : README et `group_vars` disent maintenant la distinction (la sonde porte ce que l'emplacement normalise) avec les deux formes GitLab côte à côte, et le message d'échec cite la forme de la sonde parmi les causes. Même phrase : `/merge_requests` au lieu de `/pulls` pour les propositions — là, pas d'assertion trompée, le `POST` rend un 404 visible (fail-closed). La branche GitLab reste **non mesurée sur une instance réelle** : banc et rendu seulement, comme le reste de la matrice. |
+
+**Cinquième passe de revue.** Quatre constats, tous dans le **template d'injection** : trois confirmés — deux par la mesure, dont un plus grave que décrit — et un réfuté dans son mécanisme.
+
+| Constat | Mesure | Suite |
+|---|---|---|
+| Le remplacement en chaîne `replace('TOKEN_B64', …) \| replace('TOKEN', …)` : le second s'applique à la **sortie** du premier, et `TOKEN` est un fragment base64 valide | **Confirmé, et reproduit dans l'artefact** : avec un jeton construit pour que son base64 le contienne (`YWdlbnQtc3JlOmFhTOKENA==`), l'en-tête rendu devient `Basic YWdlbnQtc3JlOmFhaaL…4A==` — base64 corrompu, donc LFS en 401. Fenêtre minuscule sur un vrai jeton (≈3·10⁻⁸), mais le défaut est réel et **silencieux**. | **Corrigé** : chaque forme est construite depuis l'en-tête **déclaré**, jamais depuis la sortie de l'autre. Rendu : base64 **intact**. |
+| Un **chemin** dans l'amont (un simple slash final suffit) | **Confirmé, et plus grave que « tout part en 404 »** : banc, l'emplacement déclaré `…/owner/repo/` avec un amont suffixé d'un slash transmet `/api/v1/user/keys` pour une requête `…/owner/repo/api/v1/user/keys` — l'agent atteint **l'API du compte** avec le jeton injecté. Ce n'est pas une casse mais un **contournement du bornage** : `location` décide *si*, l'amont décide *quoi*. | **Corrigé** : l'assertion exige une **origine nue** (`^https://[^/\s]+$`) — chemin, espace final et `http://` refusés ; les chemins se déclarent dans les emplacements, et le message le dit. Banc des huit formes. |
+| L'antislash du jeton, « car `\123` serait interprété » | **Mécanisme réfuté, danger confirmé** : banc, `\123`, `\q` et `\e` ressortent **inchangés** — mais `\n` **tronque la valeur** (`a\nb` arrive en `a`, l'en-tête s'arrête là), `\t` insère une tabulation, et `\"`/`\\` sont bien des échappements. Un jeton portant `\n` en texte était donc mutilé en silence. | **Corrigé autrement que proposé** : plutôt que d'interdire l'antislash (ce qui refuserait un jeton légitime), le template **échappe** `\` et `"`. Mesuré de bout en bout : jeton `abc\ndef`, l'amont reçoit `'token abc\ndef'` **entier**. L'assertion ne refuse plus que ce que nginx ne sait pas échapper — `$` et les espaces. |
+| L'endpoint LFS **nu** (`…/info/lfs`, sans slash) tombe en 404 | **Confirmé, et c'est une incohérence interne** : c'est **exactement l'URL que le relais annonce** en réponse à `git-lfs-authenticate`, et l'ensemble routé ne la contenait pas. | **Corrigé** : la localisation déclarée perd son slash final, donc le template émet les **deux** formes — `= …/info/lfs` et `…/info/lfs/` : le sous-chemin `objects/batch` reste servi et l'URL annoncée répond (mesuré, 200). |
+
+**Sixième passe de revue** (deux relectures indépendantes, dont une avec fuzz du relais sur 44 cas et relecture du décodeur de nginx dans son source : aucun défaut de sécurité trouvé dans les deux rôles). Trois correctifs, un mesuré.
+
+| Constat | Mesure | Suite |
+|---|---|---|
+| **La fenêtre du filtre d'egress** — le seul vrai reste opérationnel, désigné n°1 par la revue | Le play **détruit** la table en pré-tâche et seul le **dernier** rôle la rétablit : tout échec entre les deux laissait la zone agent ouverte, indéfiniment — et le diff ajoute des points d'échec après la levée. Les pré-vols réduisent la probabilité, pas la classe. | **Tenté, mesuré, retiré.** Un handler de play avec `force_handlers: true`, notifié par la levée, *marche* sur l'échec (mesuré : échec provoqué → la table est revenue) mais **casse le chemin nominal** : six rôles font `flush_handlers` en cours de play (agent_egress_proxy, git_broker, inference_gateway, k8s_broker, ollama, token_proxy) et le premier d'entre eux déclenche le handler au milieu du socle — le filtre revient avant que `nvm`/`npm`, qui tournent sous l'uid du harnais, aient fini. Mesuré : le play échoue à `nvm install lts/*`, `Version '' (with LTS filter) not found` en 0,15 s (rejet immédiat, donc filtre déjà remis). Second fait mesuré : **un second play ne tourne pas** après l'échec du premier, donc pas de play de nettoyage non plus. **Handlers et second play écartés ; le play est revenu à son état vérifié.** La réponse retenue est **côté harnais** (Phase 8) : arrêter l'agent — son unité *et* ce qu'il a lancé — **avant** la levée du filtre. Elle ne réduit pas la fenêtre, elle en retire l'exploitant (un agent antagoniste peut guetter une porte ouverte, pas s'en servir arrêté), et elle renverse le mode d'échec : un play interrompu laisse l'agent **arrêté** jusqu'au prochain run au lieu d'un agent **non filtré**. Un déplacement de la levée dans le rôle `nvm` (seul rôle à sortir sous l'uid du harnais — mesuré : `developer_config` non, `apt`/`ollama`/`litellm` non plus puisque le filtre ne couvre que l'uid du harnais et ses subordonnés) a été écarté : contrat par rôle à retenir, et la levée du play redeviendra nécessaire pour les mises à jour. |
+| `basic_user` non asserté pour `TOKEN_B64` | Rendu mesuré : un `basic_user` vide produit `Basic base64(":jeton")` — un 401 LFS **à l'usage**, sans sonde pour l'attraper (l'entrée LFS n'en a pas). | **Corrigé** : l'assertion de la liste exige le nom du compte dès que l'en-tête porte `TOKEN_B64`, avec le motif dans le message. |
+| Un `Authorization` du client traverse quand l'entrée déclare un autre en-tête | GitLab **priorise** `Authorization` sur le `PRIVATE-TOKEN` qu'on lui injecte : un `Authorization: Bearer <placeholder>` envoyé par l'agent ferait 401, l'en-tête injecté étant ignoré. | **Corrigé** : quand l'entrée ne déclare pas `Authorization`, il est **vidé** (`proxy_set_header Authorization ""`). Rendu vérifié dans les deux sens : avec `PRIVATE-TOKEN` déclaré, la ligne de vidage apparaît ; avec l'en-tête Forgejo par défaut, **aucune** ligne de vidage (le déploiement réel est inchangé), et `nginx -t` passe sur la forme GitLab. |
+
+Notes sans action : le filtre de méthode **tient pour une API JSON** (le merge GitHub en `PUT` est refusé), mais une forge Rails accepte aussi `_method` en **paramètre de formulaire**, que le vidage d'en-tête ne couvre pas — à traiter côté GitLab seulement, en restreignant le `Content-Type` du `POST` ou en assumant ; la clause `%2e` du garde est une ceinture redondante (nginx résout `..` avant de choisir l'emplacement) ; `PerSourcePenalties no` exige OpenSSH ≥ 9.8 (l'image 26.04 est en 10.x — à revérifier si l'image change) ; un dépôt déclaré `repo.git2` voyage sous `repo.git2.git`, cohérent de bout en bout mais uniquement parce que la forge retire le suffixe une seconde fois.
+
+**Préparation du déploiement (à la demande du déploiement).** Trois ajouts, tous côté outillage.
+
+- **La clé de déploiement se crée elle-même.** Si `git_broker_ssh_key_src` est absent, le play la génère sur le poste de contrôle, dit quoi enregistrer — et **s'arrête** (`meta: end_play`, dont le `when` est honoré : mesuré). Sans cet arrêt, le premier run aurait échoué au `ls-remote` du rôle, c'est-à-dire **après** la levée du filtre d'egress : la zone agent serait restée ouverte. Mesuré : `ok=9 changed=1 failed=0`, clé et moitié publique en 0600, filtre **toujours chargé**, rien de modifié sur la VM.
+- **Convention des deux dossiers, posée par le déploiement : `files/` reçoit ce qu'il dépose** (le jeton, la CA, le kubeconfig), **`output/` ce que le play produit** (la clé générée et sa moitié publique). La clé n'est donc pas dans `files/` : elle est écrite sous `output/` — deux dossiers gitignorés, aucun secret suivi. `git_broker_token_src` garde son défaut sous `files/`, parce qu'un jeton est un dépôt de l'utilisateur : le play ne peut pas le créer.
+- **Les deux chemins de secrets ont un défaut** là où le kubeconfig du broker Kubernetes n'en a pas : la différence est assumée — une clé, le play peut la *créer*, un kubeconfig non. Sans défaut, la génération n'avait nulle part où écrire (mesuré à la première tentative : `ssh-keygen` recevait `-f` sans argument, parce que le défaut du rôle était la chaîne vide).
+- **La procédure du jeton est écrite** au README : compte **dédié** (jamais le compte d'administration, dont le jeton hériterait de toute l'autorité), collaborateur *Write* sur le seul dépôt, jeton *Specific repositories* avec `write:repository` (+ `write:issue` si les issues sont ouvertes), avec expiration. Et pour LFS : rien de plus à faire côté forge une fois activé — le client est déjà dans la zone agent par le socle (`essential_packages`).
+
+Reste ouvert : une clé **déjà présente mais non enregistrée** sur la forge fait échouer le run au `ls-remote`, donc après la levée du filtre — même classe que le `block`/`rescue` proposé plus haut, toujours pas fait. Reste ouvert aussi : si un amont traitait `\` comme séparateur de chemin, il faudrait ajouter `5c` au refus d'échappement. Aucun des trois (Forgejo, GitLab, GitHub) ne le fait — le `map` refuse donc ce qui est **mesuré**, pas ce qui est imaginé.
+
+15. **Un `tofu apply` qui touche la configuration cloud-init régénère les clés d'hôte de la VM**, et ce n'est pas une anomalie : mesuré à l'occasion d'un changement de `dns_servers` — la VM n'a **pas** été recréée (`/etc/machine-id` daté de la construction du gabarit, disque et déploiement intacts, plan « modify in place »), mais cloud-init a **rejoué** au boot suivant (nouvel *instance-id*), a réécrit netplan, et son module `ssh` a **supprimé puis régénéré les clés d'hôte** (`ssh_deletekeys` vaut `true` par défaut, précisément pour éviter les clés dupliquées entre clones). Conséquence pratique : après un tel apply, tout outil qui **épingle** la clé d'hôte de la VM la voit changer (`ssh-keygen -R <ip>` sur un `known_hosts`) ; le harnais réglé par `ssh_deletekeys: false` dans le user-data si c'est gênant. **Le broker n'en dépend pas** : la clé qu'épingle la zone agent est la **sienne** (`/etc/git-broker/ssh_host_ed25519_key`), sur le disque avec le déploiement — vérifié, le `ls-remote` du harnais fonctionne après le redémarrage.
+
+**Risques résiduels.**
+
+1. **Les liens LFS dépendent de la forge** : Forgejo/Gitea les construisent depuis l'hôte de la requête depuis 1.25.4, avant depuis `ROOT_URL`. Les deux entrées HTTP présentent donc le **nom de la forge** — ce qu'un frontal qui route par nom (Traefik, ici) accepte, et que l'agent n'a pas à connaître — les liens arrivent avec ce nom, et les **trois** formes qu'ils peuvent porter — alias, nom de la forge, endpoint loopback avec son port — sont réécrites vers le proxy (quatre règles : le nom de la forge compte pour **deux**, le lien portant le scheme de sa `ROOT_URL`, pas celui du proxy) : c'est ce qui ramène le transfert, donc le credential, sur le loopback **sans** que l'agent en détienne un. À vérifier en premier sur la forge réelle : l'aller-retour LFS, puisque c'est désormais la réécriture du **nom** qui porte le transfert (mécanisme mesuré, cette base-ci non).
+2. **GitHub et LFS** : GitHub délègue ses transferts LFS à S3 — un objet LFS ne passerait donc pas par ce broker (le stockage objet d'une forge auto-hébergée pose la même question). Ce n'est pas le broker qu'il faut élargir mais l'**egress** : déclarer le stockage dans `agent_egress_proxy_allowlist`. LFS est une histoire Forgejo/GitLab ; le transport git et l'API, eux, sont bien génériques.
+3. **Un objet LFS traverse nginx** : corps non borné et délai long **sur cette entrée seulement** (l'API garde ses bornes). C'est le prix direct de LFS.
+4. **Deux nouvelles portes loopback** (`2222`, `8002`), comme l'était `8001` : la Phase 7 doit les connaître, et toute écoute supplémentaire devra entrer dans `agent_egress_blocked_loopback_ports` ou authentifier ses appelants.
+5. **Le relais est atteignable depuis la zone agent** : sa surface reste *un* verbe, et la commande transmise est **reconstruite** depuis le dépôt déclaré — jamais rejouée telle qu'elle est arrivée. Tout second verbe (API, shell, forward) ouvrirait la même question.
+6. **Le PAT porte toute l'autorité du compte** : le bornage vient de ses *permissions* sur la forge (un writer ne devient pas admin), de la protection de branche, **et des chemins/verbes que le proxy route** — l'API du compte n'est pas atteignable depuis la zone agent, même avec un jeton valide. `PATCH` sur `/pulls` et `/issues` (au défaut, cf. `git_broker_api_proposal_methods`) laisse l'agent modifier ou fermer une pull request — la sienne comme celle d'un humain, la forge n'ayant pas de permission par objet : dommage borné au dépôt déclaré et réversible par un humain, là où les réglages du dépôt (protection de branche comprise) restent hors d'atteinte, le préfixe nu étant en lecture seule.
+7. **Les tags** doivent être protégés côté forge, sinon un tag poussé par l'agent déclenche un pipeline de déploiement — même raisonnement que la branche.
+8. **La clé d'hôte de la forge est épinglée** : si la forge change de clé, le broker casse jusqu'à mise à jour — la panne est voulue, et le message du contrôle d'effet dit quoi regarder.
+9. **Refus SSH après acceptation de la clé : c'est la pénalité de source d'OpenSSH, et c'est mesuré.** L'`sshd` **système** tourne avec les défauts d'OpenSSH 10.2 (`persourcepenalties crash:90 authfail:5 noauth:1 … min:15 max:600`) et son journal porte **17** événements `srclimit_penalise: ipv4: new 10.20.1.250/32 deferred penalty of 5 seconds for penalty: failed authentication`, horodatés à l'identique des deux refus subis (14:12:19, puis la séquence de 14:25). Côté client la trace est `Server accepts key` **deux fois** puis refus : la clé *proposée* est connue du serveur (PK_OK), c'est la connexion qui est ensuite différée. **fail2ban est hors de cause** (`Total failed: 0`, `Currently banned: 0`, `ignoreip` en place). Ce n'est donc pas un défaut du dépôt, mais un effet de bord des **essais de vérification** : une connexion qui n'authentifie pas compte comme un échec, chaque échec ajoute 5 s de pénalité, et un client qui réessaie (agent SSH vide, `BatchMode=yes`) **entretient** la pénalité — d'où des blocages de plusieurs minutes. Conséquence pratique : vérifier depuis un client dont l'identité est disponible du premier coup, et en cas de refus **attendre** plutôt que réessayer.
+10. **Les redémarrages de cette VM se bloquent par intermittence** (11 s une fois, deux arrêts figés de plusieurs minutes le même jour) : c'est le défaut d'affichage/DRM de la VM, pas du dépôt. `system_reboot_on_kernel_update: false` permet à un play d'aboutir **sans** en déclencher un, ce qui est la seule façon de vérifier sur une machine qui ne survit pas toujours à son propre reboot. *(Le 19/09, deux redémarrages — 19:08 et 19:10, déclenchés par un apply de provisioning — sont passés proprement. Le déploiement a par ailleurs basculé `vga_type` de `qxl` à `virtio` dans `iac/variables.tf` : modification **non commitée** à ce jour, et c'est le remède habituel au blocage DRM de QXL.)*
+11. **`/run/sshd` appartient d'abord à l'`sshd` de la distribution** : le rôle le crée (idempotent) si besoin, mais sur une machine où `ssh.service` serait masqué, le répertoire manquerait **au démarrage** et l'unité du broker échouerait (`status=226/NAMESPACE`) jusqu'au prochain play. Non traité par `RuntimeDirectory`, qui l'aurait supprimé à l'arrêt — cassant les sessions neuves de l'administrateur, sur cette même VM.
+12. **L'entrée de lecture donne à l'agent tout ce que la forge expose sous le préfixe du dépôt déclaré** — hooks, collaborateurs, noms des secrets CI, **logs de jobs** (qui contiennent régulièrement des secrets partiellement masqués) — alors que le contenu du dépôt lui est déjà lisible par `git-upload-pack`. Élargissement **assumé** (le flux PR n'a besoin que de `/pulls` et `/issues`, mais l'état de la CI a été jugé utile à un agent SRE) : c'est le premier rétrécissement à envisager, et il ne coûte qu'une ligne de `git_broker_api_read_locations`.
+13. **Le proxy d'injection partage l'uid de la zone de confiance.** Il parse des réponses forgées par l'amont et il est joignable depuis la zone agent : une compromission de nginx lit donc ce que cet uid peut lire, c'est-à-dire aussi les fichiers des autres composants. Partagé **par décision** — un compte par composant n'a été retenu que là où le composant a besoin de sa propre *forme* de compte (le shell du broker git). Compensation en place : le service n'écrit que dans son répertoire d'exécution, plus dans le home commun.
+14. **Le verbe push vaut exécution de CI côté forge** : la protection de branche ne couvre pas une branche **neuve**, donc une modification de `.forgejo/workflows/` y fait tourner un runner — machine hors de la zone agent, avec son propre egress et souvent les secrets du dépôt, que le filtre d'egress de la zone agent ne couvre pas. À traiter dans le même document que la protection de branche : chemins de workflow protégés, ou secrets tenus hors des runs qu'un acteur non listé peut déclencher (README, « On the forge »).
 
 ### Hygiène
 
@@ -570,6 +732,7 @@ server {
 
 **Pourquoi cette phase en dernier.** L'unité systemd n'est le prérequis d'aucune autre phase : le contrôle d'egress (Phase 1) travaille sur l'**uid**, pas sur le service. La déplacer ici permet d'écrire un `ExecStart` qui pointe sur quelque chose de réellement installé, et de vérifier le durcissement obtenu sur une unité qui démarre.
 
+- [ ] **Arrêter le harnais avant de lever le filtre d'egress** — décision du déploiement, et elle remplace la piste « déplacer la levée dans le rôle `nvm` avec un `block`/`always` » (écartée : elle impose un contrat par rôle à retenir, et la levée au niveau du play redeviendra nécessaire pour les mises à jour). Le play lève le filtre pour toute sa durée ; sans harnais en marche, la fenêtre cesse d'être **exploitable** — un agent antagoniste peut guetter une porte ouverte, pas s'en servir si on l'a arrêté. Et le mode d'échec s'inverse : un play interrompu laisse l'agent **arrêté** jusqu'au prochain run, au lieu d'un agent **non filtré** — *fail-closed* au lieu de *fail-open*. À arrêter : `{{ harness_name }}.service` **et ce qu'il a lancé** (ses conteneurs tournent sous ses uid subordonnés, un `systemctl stop` ne les touche pas). Le redémarrage vient **après** la réapplication du ruleset, en dernier geste du play.
 - [ ] **Créer le rôle `harness_hermes`** — il n'existe pas aujourd'hui : `hermes` n'apparaît dans le dépôt que comme *nom* (défaut de `harness_name`, exemple du README), jamais comme installation. Rôle à concevoir **au moment de cette phase** et pas avant : il n'est le prérequis d'aucune autre, et ses deux paramètres déterminants ne sont pas connus à ce stade.
   - À trancher alors : le **mécanisme d'installation** (dépôt git à cloner, `uv tool install` / `pipx` / `npm -g`, binaire…) et l'**entrypoint** réel (`harness_exec_start`).
   - Il doit installer dans la zone agent et poser `harness_exec_start` + `harness_workdir` par défaut. **Seul provider livré**, volontairement.
@@ -649,6 +812,7 @@ WantedBy=multi-user.target
 | Interception TLS (MITM) **par défaut** | Coût de distribution de la CA dans tous les trust stores (système, `certifi`, `NODE_EXTRA_CA_CERTS`, git, kubeconfig) + cert pinning cassé. | **Retenue comme niveau 2 opt-in** (Phase 3), pas comme défaut. Le niveau 1 (allowlist) couvre la majorité des cas. |
 | Résolveur DNS en zone de confiance | Annoncé en Phase 1, il ne sert rien : un client derrière un proxy *forward* envoie le **nom** dans sa requête CONNECT, c'est le proxy qui résout. Et un client qui résoudrait pour se connecter lui-même n'a de toute façon aucune IP hors loopback à joindre — il échouerait après avoir résolu. Un composant de plus pour zéro capacité. | Le jour où un client exigerait une résolution préalable **et** un chemin réseau hors loopback qui ne passe pas par le proxy. |
 | Migration complète UFW → nftables | UFW gère bien l'ingress, est déployé, et fail2ban utilise son action `ufw`. | Jamais nécessaire : les deux coexistent (Phase 1). |
+| Retirer la loopback (`127.0.0.1/8`) de `fail2ban ignoreip` | La prison est en `mode = aggressive` : une connexion qui **ne s'authentifie pas** compte déjà comme un échec, donc cinq clés proposées par la zone agent poseraient un ban UFW sur `127.0.0.1` qui couperait **tout** l'accès loopback au port 22 — celui de l'opérateur comme les sessions loopback du play. Ce qui rend l'exemption inoffensive : `AuthenticationMethods publickey` + `PasswordAuthentication no`, il n'y a donc rien à deviner, seulement à limiter — et l'`sshd` système garde pour cela les pénalités de source d'OpenSSH 10 (`authfail:5`, mesurées au §5). | Le jour où une authentification par mot de passe serait activée : l'exemption loopback et elle ne peuvent pas coexister (`security_hardening_ssh_password_authentication`). |
 | Vault / OpenBao / SPIFFE / OIDC apiserver | Se justifie quand il y a des secrets d'infrastructure à protéger. Complexité non testée = risque en soi. | Le jour où un vrai secret entre dans le périmètre. |
 | Kyverno / OPA Gatekeeper côté cluster | En lecture seule, n'apporte rien. | Le jour où l'agent obtient un **verbe d'écriture** (le RBAC ne peut pas inspecter le contenu d'un manifeste : avec `create pods`, un pod `privileged` + `hostPath: /` possède le nœud). |
 | Second VM pour la zone de confiance | Frontière interne faible, compensée par l'absence de secrets. | Quand un secret d'infrastructure entre dans le périmètre. |
@@ -658,6 +822,14 @@ WantedBy=multi-user.target
 | RBAC du broker appliqué par le play | Le dépôt ne possède pas le cluster, et l'appliquer exigerait d'y laisser un kubeconfig d'admin sur le poste. Le manifeste est livré, la pose appartient au déploiement. | Le jour où le projet déploie aussi le cluster. |
 | Jeton du broker **domicilié dans un coffre** (OpenBao/Vault, source de vérité, matérié par ESO) | Le cluster **frappe** ce jeton : le contrôleur remplit `.data.token` et la valeur est signée par l'apiserver — un coffre ne peut donc pas en être la source, seulement un second domicile. Et la livraison par ESO supposerait que la VM **lise un Secret k8s**, c'est-à-dire le contrôle même que ce design ferme : le credential du broker ne peut pas venir par le broker. | Un IdP externe authentifiant l'apiserver (OIDC), ou le jour où un composant de la VM renouvellerait lui-même son jeton (voir la ligne TokenRequest). |
 | Renouvellement automatique du jeton (CronJob cluster + PushSecret + timer sur la VM) | Quatre composants et deux secrets de plus pour renouveler **un** credential en lecture seule, loopback seul, illisible par l'agent — dont la vraie mitigation est la **révocation** (supprimer le Secret invalide l'ancien jeton immédiatement), pas la rotation. | Une exigence de conformité qui impose une durée de vie bornée. |
+| Broker git en HTTP seul (nginx + `Basic` sur `/<owner>/<repo>.git/`, le plan initial) | La forge de ce déploiement ne sert **que** le SSH, et le git HTTP change de chemin, de port et de politique selon la forge là où le SSH a la même forme partout. Surtout : **aucun proxy ne peut injecter dans un canal chiffré**. | Le jour où une forge n'exposerait que le HTTP — le design revient alors à une simple `location` d'injection, déjà supportée. |
+| Le terminateur SSH remplacé par mitmproxy, déjà déployé | Un addon est du **code** là où `proxy_set_header` est de la configuration, et router un jeton de broker à travers le proxy L7 brouillerait la frontière que la Phase 3 a posée. | Le jour où l'injection demanderait de la logique (signature, transformation de corps). |
+| `lfs.url` global, ou `insteadOf` seul, pour ramener LFS sur le loopback | `lfs.url` est **global** — il ne vaut que pour un seul dépôt, alors que le broker en autorise une liste ; et mesuré, `insteadOf` ne réécrit pas l'endpoint batch. Le relais répond `git-lfs-authenticate` : par dépôt, et sans secret. | Le jour où git-lfs cesserait d'appeler `git-lfs-authenticate` sur un remote SSH. |
+| Une clé SSH utilisable dans la zone agent (clé de déploiement en écriture, bornée par la protection de branche) | C'est la tentation la moins chère, et elle viole §0 : la clé serait **exfiltrable et réutilisable depuis l'extérieur**, donc un credential persistant à révoquer — là où celle du broker ne quitte jamais la VM. | Une forge sans aucune protection de branche, où le bornage n'existerait de toute façon plus. |
+| Ligne de repli `SSH_ORIGINAL_COMMAND` dans le relais | **Morte, et pas seulement aujourd'hui** : sshd ne pose cette variable que sous une commande *forcée*, et il exécute alors la commande forcée par `<shell> -c` — `argv[2]` est donc **non vide** et la variable n'est jamais lue (`man sshd_config`, *ForceCommand*). Elle ne peut pas sauver la bascule qu'elle semble protéger, et le contrôle d'effet du rôle (`ls-remote` sous l'uid du harnais) casserait bruyamment si la commande arrivait un jour ailleurs. | Jamais : le chemin n'existe pas. |
+| Nettoyage des blocs d'injection à deux bornes (`< 1` ou `> N`) | Le `< 1` **n'est pas mort** : `int` rend **0** pour un nom qui n'est pas un nombre, et c'est la seule clause qui retire un `.conf` étranger. La condition dit donc son intention une fois — `not in range(1, N+1)` — au lieu de deux bornes dont l'une paraît morte sans l'être. | Le jour où le rôle cesserait d'écrire `1.conf`…`N.conf`. |
+| Clause `/+$` du contrôle d'unicité des dépôts (`git_broker_repos`) | **Morte** : l'item voisin de la même assertion refuse tout `/` final (`select('search', '/$') | length == 0`), donc retirer les slashes finaux ne peut jamais changer le verdict — mesuré sur huit formes d'entrée, slash final et doublon avec slash final compris (verdicts identiques). Le message d'échec annonçait pourtant « a trailing slash are dropped » : il est corrigé, et la condition tient désormais sur **une ligne** (143 car.). | Le jour où l'item « pas de slash final » quitterait ce `that:`. |
+| Ajouter le verbe `git-upload-archive` au relais (`git archive --remote`) | **Forgejo l'accepte** (`allowedCommands` → `AccessModeRead`, comme `git-upload-pack`), donc l'ajouter ouvrirait réellement quelque chose — et ça n'apporterait rien : par défaut `git-upload-archive` ne sert qu'un arbre pointé **directement par une ref**, ou un sous-arbre `ref:path`, c'est-à-dire exactement ce que l'agent a déjà par `clone`. Le seul gain serait la bande passante d'une extraction sans copie, or l'agent est précisément celui qui doit en détenir une pour proposer une branche. Et le rayon dépend d'un réglage **côté forge** — `uploadarchive.allowUnreachable`, défaut `false`, dont git dit lui-même qu'il protège « the privacy of objects that have been removed from history but may not yet have been pruned » : à `true`, un client demande des sha1 arbitraires, donc l'historique réécrit. Enfin GitHub **refuse** ce verbe et le git-HTTP ne le transporte pas : ce serait une capacité dépendante de la forge, à l'inverse de la raison qui a fait choisir SSH. | Le jour où un harnais exigerait `git archive --remote` (extraire un sous-arbre d'un très gros dépôt sans le cloner) : l'implémentation est **un mot** dans le `case` du relais — `$# -eq 2` tient, les arguments de l'archive passent dans le protocole — et il faut alors **vérifier sur la forge** que `uploadarchive.allowUnreachable` est à `false`. |
 
 ---
 
@@ -670,6 +842,23 @@ ssh <admin>@<vm_ip>              # admin
 ssh {{ harness_name }}@<vm_ip>   # zone agent
 ```
 
+### 🚑 Accès perdu, sans console
+
+Aucun compte de la VM n'a de mot de passe : la console Proxmox n'est **pas** une porte de secours. L'agent invité QEMU en est une — il est provisionné par ce projet :
+
+```bash
+qm list                          # le VMID
+qm guest exec <vmid> -- /bin/bash -c 'systemctl is-active ssh; fail2ban-client status sshd | tail -6; uptime -p'
+qm guest exec <vmid> -- /usr/bin/fail2ban-client set sshd unbanip <votre-ip>   # ban fail2ban
+qm guest exec <vmid> -- /usr/bin/systemctl start ssh                           # sshd arrêté
+# Un mot de passe de console, sans toucher à SSH (PasswordAuthentication reste à no) :
+qm guest exec <vmid> -- /bin/bash -c "echo '<compte>:<mot-de-passe>' | chpasswd"
+```
+
+**Le piège, mesuré** : la prison SSH est en `mode = aggressive` — une connexion qui **ne s'authentifie pas** compte déjà comme un échec. Cinq échecs dans les dix minutes précédentes (un test de port répété suffit, et une VM qui redémarre en produit aussi) valent **une heure de ban**. D'où `security_hardening_fail2ban_ignoreip`, qui doit nommer le poste de contrôle.
+
+**Le second piège, mesuré** : l'`sshd` **système** garde les pénalités de source d'OpenSSH 10 (`persourcepenalties … authfail:5 min:15 max:600`). Une connexion qui n'authentifie pas compte comme un échec, chaque échec ajoute 5 s de refus **pour votre IP**, et un client qui réessaie en boucle (agent SSH vide, `BatchMode=yes`) **entretient** la pénalité : `Permission denied (publickey)` *après* que le serveur a reconnu la clé (`Server accepts key`). Il n'y a rien à débloquer — **attendre** une quinzaine de secondes suffit, et réessayer ne fait que prolonger. Preuve dans le journal : `journalctl -u ssh | grep srclimit`.
+
 ### 🧪 Vérifications de santé
 
 ```bash
@@ -681,6 +870,10 @@ ssh {{ harness_name }}@<vm_ip> "docker run --rm alpine uname -a"
 ssh {{ harness_name }}@<vm_ip> "curl -s http://127.0.0.1:4000/v1/models"
 # Le port amont du provider est fermé à la zone agent — attendu en échec (rc=28)
 ssh {{ harness_name }}@<vm_ip> "curl -m 4 -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:11434/api/tags"
+# Le port SSH de l'hôte (22) est fermé de la même façon — le drop est silencieux : ça EXPIRE au lieu de
+# refuser, donc un rc=124 est le filtre qui marche, pas une panne réseau
+ssh {{ harness_name }}@<vm_ip> 'timeout 4 bash -c "exec 3<>/dev/tcp/127.0.0.1/22"; echo rc=$?'   # attendu : rc=124
+ssh <admin>@<vm_ip> "nft list chain inet agent_egress output | grep -c 'dport 22'"              # attendu : 4 règles
 # Le gateway tourne-t-il bien hors de l'uid du harnais ?
 ssh <admin>@<vm_ip> "systemctl show inference-gateway -p User -p ActiveState"
 
@@ -716,10 +909,45 @@ ssh <admin>@<vm_ip> "journalctl -u k8s-broker -n 20"
 # Ce que le jeton peut réellement faire — côté cluster, avec le kubeconfig du broker
 kubectl --kubeconfig=ansible/files/k8s-broker.kubeconfig auth can-i --list
 
+# Broker git (Phase 5) : l'agent propose, ne détient rien, et n'obtient aucun shell
+ssh {{ harness_name }}@<vm_ip> "git ls-remote ssh://git-broker/<owner>/<repo>.git"
+# Attendu : les références du dépôt. La clé du harnais n'ouvre QUE le relais, et le relais ne rejoue
+# rien de ce qui arrive : un dépôt non déclaré, un shell, et tout argument surnuméraire sont refusés.
+ssh {{ harness_name }}@<vm_ip> "ssh git-broker id"                 # attendu : refusé
+ssh {{ harness_name }}@<vm_ip> "ssh git-broker \"git-upload-pack '/<owner>/<repo>.git' ; id\""   # attendu : refusé
+ssh <admin>@<vm_ip> "journalctl -t git-broker -n 20"               # une ligne par refus
+# Les deux portes tournent hors de l'uid du harnais, sur le loopback seul
+ssh <admin>@<vm_ip> "systemctl show git-broker-ssh -p User -p ActiveState; systemctl show token-proxy -p User -p ActiveState"
+ssh <admin>@<vm_ip> "ss -tlnp | grep -E '2222|8002'"
+# La moitié HTTP : le jeton est injecté par le proxy, l'agent n'en détient aucun — et l'API du COMPTE
+# n'est pas routée : seuls les dépôts déclarés le sont, en lecture (GET sur le préfixe du dépôt, ce
+# qui inclut ce que la forge y expose : hooks, collaborateurs, logs de jobs — cf. risque 12) et en
+# proposition (GET/POST/PATCH sur /pulls et /issues, cf. git_broker_api_proposal_methods).
+ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>"          # attendu : 200
+ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' -X DELETE http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>"   # attendu : 403
+ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8002/api/v1/user/keys"                   # attendu : 404
+# Les chemins déclarés sont BORNÉS : un dépôt dont le nom allonge un nom déclaré n'est pas routé
+ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>-x"       # attendu : 404
+# Et un chemin doublement encodé est refusé : l'emplacement est choisi sur l'URI normalisée, l'URI
+# brute part vers la forge, donc un %25 dit deux choses à deux endroits (--path-as-is, sinon curl
+# normalise). Le %2F, lui, reste admis : les deux côtés le lisent comme un séparateur (GitLab l'exige).
+ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' --path-as-is 'http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>/%252e%252e%252fx'"   # attendu : 403
+# Le merge est fermé par le proxy (location regex, donc avant la location préfixe) — 403 attendu partout
+ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>/pulls/1/merge"   # attendu : 403
+# La CRÉATION de PR reste ouverte : même famille de chemin, route et verbe différents — la réponse vient
+# alors de la forge (4xx), pas du proxy (403), et c'est ça qui distingue les deux
+ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' -X POST -d '{}' http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>/pulls"   # attendu : 4xx de la forge
+# Deux variantes adverses à essayer sur la forge le jour où on valide le garde : `/pulls/1/merge/`
+# (slash final) et `/pulls/1%2Fmerge` (séparateur encodé) — si l'une franchit, la regex doit l'inclure
+# La trace du proxy est dans le journal de son unité (bornée par journald, plus de fichier)
+ssh <admin>@<vm_ip> "journalctl -u token-proxy -n 20"
+# Côté forge : la protection de branche refuse un push direct sur la branche par défaut
+# LFS passe par le même proxy — Forgejo/GitLab seulement, GitHub délègue ses transferts à S3
+
 # Validation du code local
 tofu -chdir=iac validate && ansible-lint
 ```
 
 ### 📌 Point de départ recommandé
 
-**Phases 0, 1, 2, 3 et 4 faites** (documentation corrigée ; egress de la zone agent filtré ; gateway d'inférence en zone de confiance, table d'alias et port amont fermé ; proxy L7 à allowlist, deux niveaux ; broker Kubernetes en lecture seule, jeton hors de la zone agent). Prochaine étape : **Phase 7** (observabilité : elle porte la piste d'audit des prompts, l'audit des routes d'admin du gateway, la cible commune des journaux du proxy et le nouveau chemin loopback du broker). La **Phase 5** ne se fait que si un cas d'usage le demande, et **Phase 8** une fois le harnais choisi et installable — c'est elle qui portera l'outillage dans l'image du harnais.
+**Phases 0, 1, 2, 3, 4 et 5 faites** (documentation corrigée ; egress de la zone agent filtré ; gateway d'inférence en zone de confiance ; proxy L7 à allowlist, deux niveaux ; broker Kubernetes en lecture seule ; broker git avec transport SSH ré-originé, proxy d'injection générique, API et LFS — les trois brokers et le proxy tournant sous la zone de confiance). Prochaine étape : **Phase 7** (observabilité : elle porte la piste d'audit des prompts, l'audit des routes d'admin du gateway, la cible commune des journaux du proxy L7 et des brokers, et les trois chemins loopback que l'agent a désormais : `8001`, `2222`, `8002`). **Phase 8** une fois le harnais choisi et installable — c'est elle qui portera l'outillage dans l'image du harnais.

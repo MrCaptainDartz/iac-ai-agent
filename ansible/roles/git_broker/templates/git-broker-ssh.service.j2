@@ -1,0 +1,26 @@
+# Git broker SSH front (Ansible Managed)
+[Unit]
+Description=Git broker SSH front ({{ git_broker_service_name }})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+RuntimeDirectory={{ git_broker_service_name }}
+# sshd needs root to drop to the trust zone user; the session it opens runs as that user.
+ExecStart=/usr/sbin/sshd -f {{ git_broker_sshd_conf }} -D -e
+Restart=always
+RestartSec=5
+MemoryMax={{ git_broker_memory_max }}
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/sshd /run/{{ git_broker_service_name }} {{ git_broker_home }}
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# CAP_AUDIT_WRITE: sshd's own session records are dropped silently without it.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_SYS_CHROOT CAP_AUDIT_WRITE
+
+[Install]
+WantedBy=multi-user.target

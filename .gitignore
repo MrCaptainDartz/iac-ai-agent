@@ -47,6 +47,16 @@ ansible/group_vars/all.yml
 ansible/*.kubeconfig
 ansible/files/*.kubeconfig
 
+# Git broker: the deployment key, the forge token, a front's authority, what the play publishes
+ansible/*.key
+ansible/*.token
+ansible/*.pem
+ansible/files/*.key
+ansible/files/*.pub
+ansible/files/*.token
+ansible/files/*.pem
+ansible/output/
+
 # Python bytecode (the L7 egress proxy ships an addon)
 __pycache__/
 *.pyc

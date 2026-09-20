@@ -1,0 +1,59 @@
+#!/bin/bash
+# Git broker relay (Ansible Managed): the broker user's shell, so the request arrives as argv[2].
+cmd="${2:-}"
+# No globbing: the request is an agent's, and it is replayed nowhere as it arrived.
+set -f
+set -- $cmd
+verb="${1:-}"
+path="${2:-}"
+path="${path#\'}"
+path="${path%\'}"
+allowed="{{ git_broker_repo_paths | join(' ') }}"
+
+refuse() {
+  logger -t git-broker "refused: ${cmd:0:120}"
+  echo "git-broker: refused" >&2
+  exit 1
+}
+
+# One verb, one repository, no third word: an argument the relay does not model is an argument refused.
+case "$verb" in
+  git-upload-pack|git-receive-pack) [ "$#" -eq 2 ] || refuse ;;
+  git-lfs-authenticate) [ "$#" -eq 3 ] || refuse ;;
+  *) refuse ;;
+esac
+
+# git sends the ssh:// path with a leading slash and the scp form without, the suffix is optional.
+canonical="${path#/}"
+canonical="${canonical%.git}"
+found=0
+target=""
+for p in $allowed; do
+  entry="${p#/}"
+  entry="${entry%.git}"
+  if [ -n "$canonical" ] && [ "$canonical" = "$entry" ]; then found=1; target="$p"; fi
+done
+[ "$found" = 1 ] || refuse
+
+# LFS asks the SSH server where its endpoint is: the answer is an address, never a credential.
+if [ "$verb" = "git-lfs-authenticate" ]; then
+  case "${3:-}" in
+    download|upload) ;;
+    *) refuse ;;
+  esac
+{% if not (git_broker_lfs_deployed | bool) %}
+  # No LFS endpoint deployed: an address would be dead, and there is no credential to inject.
+  refuse
+{% else %}
+  printf '{"href":"http://127.0.0.1:{{ git_broker_http_port }}%s/info/lfs","expires_in":3600}\n' "$target"
+  exit 0
+{% endif %}
+fi
+
+# The upstream session is re-originated here: the deployment key never leaves the trust zone.
+exec ssh -F /dev/null -i {{ git_broker_ssh_key }} \
+  -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile={{ git_broker_known_hosts }} -o SendEnv=GIT_PROTOCOL \
+  -o ClearAllForwardings=yes \
+  -p {{ git_broker_forge_ssh_port }} {{ git_broker_forge_ssh_user }}@{{ git_broker_forge_ssh_host }} \
+  "$verb '$target'"
