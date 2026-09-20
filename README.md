@@ -8,7 +8,7 @@ Infrastructure as Code (IaC) solution to automatically provision and configure h
 
 1. **Infrastructure Provisioning (OpenTofu / Terraform)**: Automate the creation of one or multiple VMs on Proxmox VE (CPU, RAM, disks, network interfaces, and optional GPU/PCI passthrough) using Ubuntu Cloud-Init images with native `qemu-guest-agent` support.
 2. **Hardened Environment Configuration (Ansible)**:
-   - **Harness-Agnostic Setup**: Configurable agent harness name (`harness_name: "hermes"` or `"openclaw"`).
+   - **Harness-Agnostic Setup**: The sandbox names no agent framework — the account the agent runs as is `agent_name` (`"agent"` by default), and the harness is only an executable installed inside the agent zone.
    - **Least-Privilege Security**: Dedicated non-root user with `0750` home directory permissions and scoped sudo permissions (`restart` only) to prevent privilege escalation, denial of service, and credential dumping.
    - **Continuous Operation**: `systemd` lingering enabled (`loginctl enable-linger`) with D-Bus/XDG user session for 24/7 background agent daemons.
    - **Kernel-Isolated Sandboxing ("Secure by Default")**: Rootless **Podman** container engine configured with Google **gVisor (`runsc`) as the default runtime**. Every container (`podman run`, `docker run`, `docker compose up`) automatically runs in a memory-safe user-space kernel sandbox. The runtime is deployed through a wrapper that can also carry gVisor's own `--network=host`: Podman's `--network=host` and gVisor's are two independent settings, and with Podman's alone the sandbox gets no interface at all.
@@ -19,7 +19,7 @@ Infrastructure as Code (IaC) solution to automatically provision and configure h
      - **OS & Kernel Hardening**: `sysctl` kernel protections, memory sandbox (`yama.ptrace_scope = 1`), AppArmor enforce mode, `libpam-pwquality`, obsolete kernel modules blacklisting (`dccp`, `sctp`, `firewire`), and secure default `umask 027`.
      - **Automated Security Updates**: `unattended-upgrades` with `apt-daily.timer` and automatic kernel cleanups.
      - **Ollama Security**: Explicit localhost binding (`127.0.0.1:11434`) via systemd override — this closes the **inbound** path, so the endpoint is not reachable from the network. It does not constrain **outbound** traffic: a model backed by a remote provider still generates egress, which the agent egress filter governs separately (see below).
-     - **Inference Gateway (loopback, alias table)**: The harness asks for a **role alias** (`reasoning`, `execution`), never for a provider model, so its own configuration survives a provider change. The provider's port is closed to the agent zone, so the alias table cannot be bypassed.
+     - **Inference Gateway (loopback, alias table)**: The agent asks for a **role alias** (`reasoning`, `execution`), never for a provider model, so its own configuration survives a provider change. The provider's port is closed to the agent zone, so the alias table cannot be bypassed.
      - **L7 Egress Proxy (loopback, allowlist)**: When a deployment needs web egress, this is the agent zone's **only** way out — an explicit forward proxy whose allowlist is declared per deployment (`[.]host[:port][/path]`), refusing internal destinations. Level 1 (default) filters on destination with **no CA to distribute**; level 2 (opt-in) adds TLS interception, which buys path rules and per-request visibility at the cost of distributing an internal CA.
      - **Kubernetes Broker (loopback, read-only)**: For an SRE agent, `kubectl proxy` under the trust-zone user, reading a read-only ServiceAccount's kubeconfig that never enters the agent zone. Write methods and the `exec`/`attach`/`portforward`/`secrets` paths are refused by the proxy, and the token has no write verb either — the RBAC is the layer that counts.
      - **Git Broker (loopback, propose-only)**: An SSH front that terminates the session in the trust zone and re-originates it with the deployment key — no proxy can inject anything into an encrypted channel, and the agent holds only a key that opens the relay. Pull requests and LFS go through the token injection proxy, which replaces whatever credential the agent sent with the one it holds. The forge's branch protection is the control that bounds it — and the proxy refuses the merge route itself unless a deployment opens it, per repository.
@@ -67,15 +67,15 @@ cp ansible/group_vars/all.yml.example ansible/group_vars/all.yml
 ```
 
 Customize global settings as needed:
-- `harness_name`: Name of the agent / dedicated non-root user (e.g. `"hermes"`, `"openclaw"`, default: `"hermes"`).
-- `harness_ssh_keys`: Optional additional SSH public keys for the harness user (default: `[]`).
+- `agent_name`: Name of the account the agent runs as — the dedicated non-root user (lowercase alphanumeric and hyphens, default: `"agent"`).
+- `agent_ssh_keys`: Optional additional SSH public keys for the agent account (default: `[]`).
 - `ssh_allow_tcp_forwarding`: Set to `true` if SSH port forwarding/tunneling is needed (default: `false`).
 - `security_hardening_fail2ban_ignoreip`: Sources fail2ban never bans (default: `127.0.0.1/8 ::1`). The SSH jail runs in aggressive mode, where a connection that never authenticated already counts as a failure — declare your control node and admin workstations here, or a play can lose access for an hour mid-run.
 - `gvisor_enabled`: Enable Google gVisor (`runsc`) runtime in Podman (default: `true`).
 - `gvisor_default`: Use gVisor (`runsc`) as the default OCI runtime for all containers (default: `true`).
 - `podman_gvisor_netns`: Default network mode for **every** container, in Podman's own vocabulary (default: `""`, i.e. Podman's own choice). `host` shares the host's network namespace with every container the agent launches.
 - `podman_gvisor_hostinet`: Give **every** container gVisor's host stack instead of its netstack (default: `false`). Required for `--network=host` to work at all under rootless Podman; the narrower way is `--runtime-flag network=host` on the one container that needs the host's loopback.
-- `uv_python_version`: Python version managed by `uv` for the harness user (default: `"3.14"`).
+- `uv_python_version`: Python version managed by `uv` for the agent user (default: `"3.14"`).
 - `nvm_node_version`: Node.js version to install (default: `"lts/*"`).
 - `ollama_enabled`: Set to `false` if using an external inference server (default: `true`).
 - `ollama_models`: List of models to pull automatically (e.g. `["qwen3:4b", "qwen3-embedding:0.6b"]`). The shipped default is a small local model; remote models are a deployment choice — declare them here and set `ollama_signin_required: true` if the provider needs an interactive login.
@@ -86,7 +86,7 @@ Customize global settings as needed:
 - `inference_gateway_enabled`: Deploy the loopback inference gateway (default: `true`). `false` removes the unit, config and virtualenv, and reopens the provider's port to the agent zone.
 - `inference_gateway_port`: Loopback port the gateway listens on (default: `4000`).
 - `inference_gateway_upstream_url`: Local provider endpoint (default: `http://127.0.0.1:11434`). Used as the aliases' default `api_base`, and its port is closed to the agent zone.
-- `inference_gateway_models`: **Required** alias table — the alias the agent sees, mapped to the real provider model. The provider prefix picks the upstream endpoint (`ollama_chat/` for chat with tool calling, `ollama/` for embeddings); `api_base` defaults to the upstream URL for local models only, so a remote entry keeps its provider's own endpoint unless it declares one. A per-entry `api_key` is held by the gateway, never by the harness.
+- `inference_gateway_models`: **Required** alias table — the alias the agent sees, mapped to the real provider model. The provider prefix picks the upstream endpoint (`ollama_chat/` for chat with tool calling, `ollama/` for embeddings); `api_base` defaults to the upstream URL for local models only, so a remote entry keeps its provider's own endpoint unless it declares one. A per-entry `api_key` is held by the gateway, never by the agent.
 - `inference_gateway_debug_logging`: litellm's detailed debug stream, prompts included (default: `false`). It is a debugging aid, not an audit trail.
 - `agent_egress_proxy_enabled`: Deploy the L7 egress proxy — the agent zone's only way out (default: `false`). `false` leaves the agent zone with no web egress at all, which is the socle.
 - `agent_egress_proxy_port`: Loopback port the proxy listens on (default: `8080`).
@@ -142,7 +142,7 @@ kubectl config set-context $SA --cluster=broker --user=$SA --kubeconfig=ansible/
 kubectl config use-context $SA --kubeconfig=ansible/files/k8s-broker.kubeconfig
 ```
 
-**From the agent zone**, the cluster is at `http://127.0.0.1:8001`, and the role writes the matching kubeconfig to `/home/<harness>/.kube/config` with a `token: ignore` placeholder — an address, never a credential. A container only reaches it by sharing the host's network namespace (`--network=host`), alongside gVisor's own `--network=host` on a deployment that left `podman_gvisor_hostinet` off. A container with its own network namespace sees `127.0.0.1` as its own loopback and gets nowhere either way.
+**From the agent zone**, the cluster is at `http://127.0.0.1:8001`, and the role writes the matching kubeconfig to `/home/<agent_name>/.kube/config` with a `token: ignore` placeholder — an address, never a credential. A container only reaches it by sharing the host's network namespace (`--network=host`), alongside gVisor's own `--network=host` on a deployment that left `podman_gvisor_hostinet` off. A container with its own network namespace sees `127.0.0.1` as its own loopback and gets nowhere either way.
 
 ### 5. Git Broker (optional)
 
@@ -233,8 +233,8 @@ The playbook will:
 Connect directly as the dedicated agent user:
 
 ```bash
-ssh <harness_name>@<VM_IP_ADDRESS>
-# Example: ssh hermes@10.0.0.1
+ssh <agent_name>@<VM_IP_ADDRESS>
+# Example: ssh agent@10.0.0.1
 ```
 
 ---
@@ -249,10 +249,10 @@ ssh <harness_name>@<VM_IP_ADDRESS>
   │  ┌──────────────────────────────────────────────────┐  │
   │  │  Dedicated VM (UFW + Fail2ban + Auto-Upgrades)   │  │
   │  │  ┌────────────────────────────────────────────┐  │  │
-  │  │  │  Non-Root Harness User (e.g. hermes 0750)  │  │  │
+  │  │  │  Non-Root Agent Account (agent 0750)       │  │  │
   │  │  │  • Scoped Sudoers: restart only            │  │  │
   │  │  │  • Anti-DoS Limits: nproc 2048 / nofile    │  │  │
-  │  │  │  • Harness runs bare, outside gVisor       │  │  │
+  │  │  │  • Agent runs bare, outside gVisor         │  │  │
   │  │  │  • Podman Rootless + Docker/Compose layer  │  │  │
   │  │  │  • Python 3.14 via uv + Node.js via NVM    │  │  │
   │  │  │  ┌──────────────────────────────────────┐  │  │  │
@@ -264,15 +264,15 @@ ssh <harness_name>@<VM_IP_ADDRESS>
   └────────────────────────────────────────────────────────┘
 ```
 
-- **Scoped Sudoers**: The agent user can only restart its own service (`sudo systemctl restart <harness_name>`). Stopping the service or reading system logs (`journalctl`) is strictly prohibited. The service unit itself is created when the harness is installed — until then this rule targets a unit that does not exist yet.
+- **Scoped Sudoers**: The agent user can only restart its own service (`sudo systemctl restart <agent_name>`). Stopping the service or reading system logs (`journalctl`) is strictly prohibited. The service unit itself is created when the harness is installed — until then this rule targets a unit that does not exist yet.
 - **Rootless User Namespaces**: Containers launched by the agent cannot reach the host. The agent process itself is **not** containerized: it runs bare on the VM.
 - **gVisor by Default**: Any container invocation (`podman run`, `docker run`, `docker compose up`) automatically runs within a user-space kernel sandbox to neutralize host kernel 0-day exploits. This confines **the containers the agent launches** — not the agent.
 - **Kernel & Memory Hardening**: Core dumps disabled, kernel pointers masked (`kptr_restrict`), dmesg restricted to root, obsolete network modules blacklisted.
-- **Agent Egress Filter (nftables, per uid)**: The agent user's outbound traffic is dropped outside the loopback, **name resolution included** — a DNS query is a full outbound path, with the query name as payload. Containers the agent launches are covered whichever network mode they use. Hooked at `output priority -50`, ahead of UFW's chain, so a UFW `accept` cannot override it; UFW keeps the ingress and its own output policy. This is the control that answers a manipulated model, which the hardening above does not. A play lifts the ruleset for the duration of a run — deployment needs the network the filter removes — and re-applies it last. Until it does, the agent zone is unfiltered, so the harness is stopped for the duration of a run once it is installed: an adversarial agent can watch for an open door, but it cannot use one it is not running behind. When the inference gateway is deployed, the provider's own loopback port is closed to the agent zone as well, so the gateway is the only path to a model. The host's own port **22** is closed to the agent zone by the same list: the loopback `sshd` is the machine's only pre-auth door to root, and nothing in the agent's workflow speaks SSH to the host — an operator still reaches it, the filter being per uid.
+- **Agent Egress Filter (nftables, per uid)**: The agent user's outbound traffic is dropped outside the loopback, **name resolution included** — a DNS query is a full outbound path, with the query name as payload. Containers the agent launches are covered whichever network mode they use. Hooked at `output priority -50`, ahead of UFW's chain, so a UFW `accept` cannot override it; UFW keeps the ingress and its own output policy. This is the control that answers a manipulated model, which the hardening above does not. A play lifts the ruleset for the duration of a run — deployment needs the network the filter removes — and re-applies it last. Until it does, the agent zone is unfiltered, so the agent is stopped for the duration of a run once it is installed: an adversarial agent can watch for an open door, but it cannot use one it is not running behind. When the inference gateway is deployed, the provider's own loopback port is closed to the agent zone as well, so the gateway is the only path to a model. The host's own port **22** is closed to the agent zone by the same list: the loopback `sshd` is the machine's only pre-auth door to root, and nothing in the agent's workflow speaks SSH to the host — an operator still reaches it, the filter being per uid.
 - **L7 Egress Proxy (loopback)**: The agent zone has no route off the machine, so a proxy on the loopback is the *only* way out — its allowlist is a hard control, not a convention, and a stopped proxy means no egress at all rather than a direct fallback. The proxy resolves the destination itself, so the agent needs no name resolution; it refuses internal destinations (RFC1918, loopback, link-local, CGNAT) so it cannot become a path to the LAN, and it logs one line per request — destination and decision — which is the artifact Phase 7 builds on. At level 2 the private CA key stays in the trust zone home (`0700`), and only the certificate is published to the system store.
 - **Kubernetes Broker (loopback, read-only)**: The agent zone has no route to the cluster, so the broker is its only path, and the ServiceAccount token lives in the trust zone — the agent gets an address and a `token: ignore` placeholder. Read-only holds twice: the proxy refuses write methods and the `exec`/`attach`/`portforward`/`secrets`/`proxy` paths, and the token has no write verb either. The proxy's filter is best-effort (an encoded path can slip past it), which is why the ClusterRole is explicit rather than the built-in `view` — **the RBAC is the control that counts**. Reading the cluster is not the same as reading no secrets: pod environments, `kube-system` ConfigMaps and pod logs routinely carry tokens.
-- **Git Broker (loopback)**: The agent can propose a change, never apply one — a branch deploys nothing, so the forge's branch protection is what bounds the power. The credential is injected at the boundary: the SSH session is terminated locally and re-originated in the trust zone with the deployment key (nothing can be injected into an encrypted channel), and the HTTP half goes through a reverse proxy that overwrites the agent's own `Authorization` header with the token it holds. Two new loopback doors (`2222`, `8002`), both deliberate; the relay refuses and logs anything that is not a declared git verb on a declared repository, and the proxy routes the API of the declared repositories only, with the declared verbs only — a token that could delete a repository has no path to the door that would. Merging is the one route it closes by name: a regex location refuses `POST …/pulls/N/merge` before the prefix that would admit it, unless a deployment opens it per repository.
-- **Trust Zone & Inference Gateway (loopback)**: The harness reaches the model through a gateway bound to `127.0.0.1` and running as a **separate system user** — so the agent can neither stop it nor read its config, secrets or virtualenv. Provider keys live in a `0600` env file owned by that user and are referenced as `os.environ/...`, so they never appear in a config diff. The gateway's own files stay root-owned and group-readable: `ProtectSystem=strict` keeps them read-only for the service itself. The L7 proxy runs under the same user, and for the same reason: it holds the CA private key at level 2, and running a proxy under the harness uid would not work anyway — the uid filter would cut its own egress.
+- **Git Broker (loopback)**: The agent can propose a change, never apply one — a branch deploys nothing, so the forge's branch protection is what bounds the power. The credential is injected at the boundary: the SSH session is terminated locally and re-originated in the trust zone with the deployment key (nothing can be injected into an encrypted channel), and the HTTP half goes through a reverse proxy that overwrites the agent's own `Authorization` header with the token it holds. Two new loopback doors (`2222`, `8002`), both deliberate; the relay refuses and logs anything that is not a declared git verb on a declared repository, and the proxy routes the API of the declared repositories only, with the declared verbs only — a token that could delete a repository has no path to the door that would. Merging is the one route it closes by name: a regex location refuses `POST …/pulls/N/merge` — trailing slashes included, the variant a first cut let through — before the prefix that would admit it, unless a deployment opens it per repository.
+- **Trust Zone & Inference Gateway (loopback)**: The agent reaches the model through a gateway bound to `127.0.0.1` and running as a **separate system user** — so the agent can neither stop it nor read its config, secrets or virtualenv. Provider keys live in a `0600` env file owned by that user and are referenced as `os.environ/...`, so they never appear in a config diff. The gateway's own files stay root-owned and group-readable: `ProtectSystem=strict` keeps them read-only for the service itself. The L7 proxy runs under the same user, and for the same reason: it holds the CA private key at level 2, and running a proxy under the agent uid would not work anyway — the uid filter would cut its own egress.
 
 ---
 

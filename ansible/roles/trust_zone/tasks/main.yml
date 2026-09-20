@@ -1,6 +1,6 @@
 ---
 # tasks file for trust_zone
-# System user: any component holding a secret runs here, never under the harness uid.
+# System user: any component holding a secret runs here, never under the agent uid.
 
 - name: Validate trust_zone_user format
   ansible.builtin.assert:
@@ -8,10 +8,10 @@
       - trust_zone_user is defined
       - trust_zone_user is string
       - trust_zone_user is match('^[a-z0-9-]+$')
-      - trust_zone_user != (harness_name | default('hermes'))
+      - trust_zone_user != trust_zone_agent_name
     fail_msg: >-
       Invalid trust_zone_user '{{ trust_zone_user }}': lowercase letters, digits and hyphens only,
-      and never the harness user — the two zones would share one uid.
+      and never the agent account — the two zones would share one uid.
     success_msg: "Valid trust_zone_user: {{ trust_zone_user }}"
   when: trust_zone_enabled | default(true)
 
@@ -26,7 +26,7 @@
     state: present
   when: trust_zone_enabled | default(true)
 
-# 0700, not 0750 like the harness: the agent zone stays out.
+# 0700, not 0750 like the agent account: the agent zone stays out.
 - name: Restrict the trust zone home directory
   ansible.builtin.file:
     path: "{{ trust_zone_home }}"

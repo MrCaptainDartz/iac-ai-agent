@@ -9,15 +9,15 @@
     update_cache: true
   when: agent_egress_filter_enabled | default(true)
 
-# The harness uid is assigned by useradd and never fixed: it must be resolved here.
-- name: Get harness user UID
+# The agent uid is assigned by useradd and never fixed: it must be resolved here.
+- name: Get agent user UID
   ansible.builtin.command:
-    cmd: "id -u {{ agent_egress_harness_name }}"
+    cmd: "id -u {{ agent_egress_agent_name }}"
   register: agent_egress_uid_result
   changed_when: false
   when: agent_egress_filter_enabled | default(true)
 
-# Containers using --network=host run under a subuid, not under the harness uid.
+# Containers using --network=host run under a subuid, not under the agent uid.
 - name: Read subordinate UID ranges
   ansible.builtin.slurp:
     src: /etc/subuid
@@ -25,11 +25,11 @@
   failed_when: false
   when: agent_egress_filter_enabled | default(true)
 
-- name: Compute the set of uids to filter (harness uid + subordinate ranges)
+- name: Compute the set of uids to filter (agent uid + subordinate ranges)
   ansible.builtin.set_fact:
     agent_egress_uids: >-
       {{ agent_egress_uid_result.stdout }}{% for line in agent_egress_subuid_lines
-      if line.split(':')[0] == agent_egress_harness_name %}, {{ line.split(':')[1] }}-{{
+      if line.split(':')[0] == agent_egress_agent_name %}, {{ line.split(':')[1] }}-{{
       line.split(':')[1] | int + line.split(':')[2] | int - 1 }}{% endfor %}
   vars:
     agent_egress_subuid_lines: "{{ (agent_egress_subuid_raw.content | default('') | b64decode).splitlines() }}"

@@ -1,7 +1,7 @@
 ---
 # defaults file for agent_egress
 agent_egress_filter_enabled: true
-agent_egress_harness_name: "{{ harness_name | default('hermes') }}"
+agent_egress_agent_name: "{{ agent_name }}"
 agent_egress_ruleset_path: /etc/nftables/agent-egress.nft
 agent_egress_service_name: agent-egress
 agent_egress_nft_binary: /usr/sbin/nft

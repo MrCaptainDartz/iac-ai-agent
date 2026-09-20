@@ -1,0 +1,126 @@
+---
+# tasks file for agent_user
+
+- name: Validate agent_user_name format
+  ansible.builtin.assert:
+    that:
+      - agent_user_name is defined
+      - agent_user_name is string
+      - agent_user_name is match('^[a-z0-9-]+$')
+    fail_msg: "Invalid agent_user_name '{{ agent_user_name }}'. It must contain only lowercase letters, digits, and hyphens."
+    success_msg: "Valid agent_user_name: {{ agent_user_name }}"
+
+- name: Create agent user
+  ansible.builtin.user:
+    name: "{{ agent_user_name }}"
+    comment: "Agent Zone User - {{ agent_user_name }}"
+    shell: /bin/bash
+    create_home: true
+    home: "/home/{{ agent_user_name }}"
+    state: present
+
+- name: Ensure agent user home directory has correct ownership and permissions
+  ansible.builtin.file:
+    path: "/home/{{ agent_user_name }}"
+    owner: "{{ agent_user_name }}"
+    group: "{{ agent_user_name }}"
+    mode: '0750'
+    state: directory
+
+- name: Create .ansible/tmp directory for agent user
+  ansible.builtin.file:
+    path: "/home/{{ agent_user_name }}/.ansible/tmp"
+    owner: "{{ agent_user_name }}"
+    group: "{{ agent_user_name }}"
+    mode: '0700'
+    state: directory
+
+- name: Configure scoped sudoers permissions (restart only)
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ agent_user_name }}"
+    owner: root
+    group: root
+    mode: '0440'
+    content: |
+      # Scoped sudo permissions for {{ agent_user_name }}
+      # Security: Allows only restarting its own service. Stopping and reading logs are strictly restricted.
+      {{ agent_user_name }} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart {{ agent_user_name }}
+    validate: /usr/sbin/visudo -cf %s
+
+- name: Check if systemd linger is already enabled for agent user
+  ansible.builtin.stat:
+    path: "/var/lib/systemd/linger/{{ agent_user_name }}"
+  register: agent_user_linger_stat
+
+- name: Enable systemd lingering for agent user
+  ansible.builtin.command:
+    cmd: "loginctl enable-linger {{ agent_user_name }}"
+  when: not agent_user_linger_stat.stat.exists
+  changed_when: not agent_user_linger_stat.stat.exists
+
+- name: Configure .bashrc for agent user
+  ansible.builtin.blockinfile:
+    path: "/home/{{ agent_user_name }}/.bashrc"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - Agent Environment"
+    block: |
+      # D-Bus and XDG Runtime configuration for systemd user services
+      export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+      if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+        export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
+      fi
+
+      # Point Docker tools to Podman Rootless socket
+      export DOCKER_HOST="unix:///run/user/$(id -u)/podman/podman.sock"
+
+      # User local binaries
+      export PATH="$HOME/.local/bin:$PATH"
+    create: true
+    owner: "{{ agent_user_name }}"
+    group: "{{ agent_user_name }}"
+    mode: '0644'
+
+- name: Configure .bash_profile to source .bashrc for login shells
+  ansible.builtin.copy:
+    dest: "/home/{{ agent_user_name }}/.bash_profile"
+    owner: "{{ agent_user_name }}"
+    group: "{{ agent_user_name }}"
+    mode: '0644'
+    content: |
+      # .bash_profile - Executed for login shells
+      if [ -f ~/.bashrc ]; then
+        . ~/.bashrc
+      fi
+
+- name: Create .ssh directory for agent user
+  ansible.builtin.file:
+    path: "/home/{{ agent_user_name }}/.ssh"
+    owner: "{{ agent_user_name }}"
+    group: "{{ agent_user_name }}"
+    mode: '0700'
+    state: directory
+
+- name: Check if admin authorized_keys exists
+  ansible.builtin.stat:
+    path: "/home/{{ ansible_user }}/.ssh/authorized_keys"
+  register: agent_user_admin_keys_stat
+
+- name: Copy authorized_keys from admin user to agent user
+  ansible.builtin.copy:
+    src: "/home/{{ ansible_user }}/.ssh/authorized_keys"
+    dest: "/home/{{ agent_user_name }}/.ssh/authorized_keys"
+    remote_src: true
+    owner: "{{ agent_user_name }}"
+    group: "{{ agent_user_name }}"
+    mode: '0600'
+  when: agent_user_admin_keys_stat.stat.exists
+
+- name: Add custom agent SSH authorized keys
+  ansible.builtin.lineinfile:
+    path: "/home/{{ agent_user_name }}/.ssh/authorized_keys"
+    line: "{{ item }}"
+    create: true
+    owner: "{{ agent_user_name }}"
+    group: "{{ agent_user_name }}"
+    mode: '0600'
+  loop: "{{ agent_user_ssh_keys | default([]) }}"
+  when: agent_user_ssh_keys is defined and (agent_user_ssh_keys | length > 0)

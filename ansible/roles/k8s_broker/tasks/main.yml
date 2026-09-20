@@ -142,17 +142,17 @@
   ansible.builtin.file:
     path: "{{ k8s_broker_agent_kubeconfig | dirname }}"
     state: directory
-    owner: "{{ k8s_broker_harness_name }}"
-    group: "{{ k8s_broker_harness_name }}"
+    owner: "{{ k8s_broker_agent_name }}"
+    group: "{{ k8s_broker_agent_name }}"
     mode: '0700'
   when: k8s_broker_enabled | default(false)
 
 - name: Deploy the agent zone kubeconfig
   ansible.builtin.template:
-    src: harness-kubeconfig.j2
+    src: agent-kubeconfig.j2
     dest: "{{ k8s_broker_agent_kubeconfig }}"
-    owner: "{{ k8s_broker_harness_name }}"
-    group: "{{ k8s_broker_harness_name }}"
+    owner: "{{ k8s_broker_agent_name }}"
+    group: "{{ k8s_broker_agent_name }}"
     mode: '0600'
   when: k8s_broker_enabled | default(false)
 

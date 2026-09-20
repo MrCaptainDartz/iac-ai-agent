@@ -29,7 +29,7 @@
   environment:
     PATH: "/usr/local/bin:{{ ansible_facts['env']['PATH'] | default('/usr/bin:/bin') }}"
 
-- name: Install Python version via uv for harness user
+- name: Install Python version via uv for agent user
   ansible.builtin.command:
     cmd: "uv python install {{ uv_python_version }}"
   become: true

@@ -1,5 +1,5 @@
 ---
 # defaults file for nvm
-nvm_user: "{{ harness_name | default(ansible_user) }}"
+nvm_user: "{{ agent_name }}"
 nvm_node_version: "lts/*"
 nvm_version: "v0.40.6"

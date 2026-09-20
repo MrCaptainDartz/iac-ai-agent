@@ -1,9 +1,9 @@
 ---
 # Global variables for the project. Copy this file to 'all.yml' and customize it.
 
-# Harness / Agent configuration
-harness_name: "hermes" # e.g. "hermes", "openclaw", "smolagents" (lowercase alphanumeric + hyphens)
-harness_ssh_keys: [] # Additional SSH public keys for the harness user
+# Agent zone configuration
+agent_name: "agent" # The account the agent runs as (lowercase alphanumeric + hyphens)
+agent_ssh_keys: [] # Additional SSH public keys for the agent account
 
 # SSH Security Configuration
 ssh_allow_tcp_forwarding: false # Set to true if SSH port forwarding/tunneling is needed

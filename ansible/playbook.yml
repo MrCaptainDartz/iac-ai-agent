@@ -3,6 +3,10 @@
   hosts: all
   become: true
   pre_tasks:
+    - name: Default the agent account name when the deployment did not set it
+      ansible.builtin.set_fact:
+        agent_name: "{{ agent_name | default('agent') }}"
+
     - name: Wait for cloud-init to finish its initial setup
       ansible.builtin.wait_for:
         path: /var/lib/cloud/instance/boot-finished
@@ -141,14 +145,14 @@
     - essential_packages
     - developer_config
     - security_hardening
-    - harness_user
+    - agent_user
     - podman_gvisor
     - firewall
     - nvm
     - uv
     - role: ollama
       when: ollama_enabled | default(true)
-    # Trust zone first: every component holding a secret runs under it, never under the harness uid.
+    # Trust zone first: every component holding a secret runs under it, never under the agent uid.
     - trust_zone
     - inference_gateway
     - agent_egress_proxy
@@ -178,7 +182,7 @@
       ansible.builtin.debug:
         msg:
           - "{{ inventory_hostname }} is ready!"
-          - "Connect to the VM with 'ssh {{ harness_name | default('hermes') }}@{{ ansible_host }}'"
+          - "Connect to the VM with 'ssh {{ agent_name }}@{{ ansible_host }}'"
           - >-
             {{ 'Ollama is installed and ready. You can initialize your AI agent.'
                if (ollama_enabled | default(true))

@@ -1,0 +1,4 @@
+---
+# defaults file for agent_user
+agent_user_name: "{{ agent_name }}"
+agent_user_ssh_keys: "{{ agent_ssh_keys | default([]) }}"

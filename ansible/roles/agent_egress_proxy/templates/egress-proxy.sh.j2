@@ -1,6 +1,6 @@
 # Agent zone egress proxy (Ansible Managed)
 # Interactive sessions of the agent zone only: the admin keeps a direct egress.
-if [ "$(id -u)" = "{{ agent_egress_proxy_harness_uid.stdout }}" ]; then
+if [ "$(id -u)" = "{{ agent_egress_proxy_agent_uid.stdout }}" ]; then
   export HTTP_PROXY="http://127.0.0.1:{{ agent_egress_proxy_port }}"
   export HTTPS_PROXY="$HTTP_PROXY"
   export http_proxy="$HTTP_PROXY"

@@ -34,20 +34,6 @@
     state: link
     force: true
 
-- name: Ensure subordinate UID range exists for harness user
-  ansible.builtin.lineinfile:
-    path: /etc/subuid
-    line: "{{ podman_gvisor_harness_name }}:100000:65536"
-    create: true
-    mode: '0644'
-
-- name: Ensure subordinate GID range exists for harness user
-  ansible.builtin.lineinfile:
-    path: /etc/subgid
-    line: "{{ podman_gvisor_harness_name }}:100000:65536"
-    create: true
-    mode: '0644'
-
 - name: Create systemd user service drop-in directory for cgroup delegation
   ansible.builtin.file:
     path: /etc/systemd/system/user@.service.d
@@ -65,27 +51,43 @@
     mode: '0644'
   notify: Reload systemd daemon
 
-- name: Check if gVisor runsc is already installed
-  ansible.builtin.stat:
-    path: /usr/local/bin/runsc
-  register: podman_gvisor_runsc_stat
-  when: podman_gvisor_enabled | default(true)
-
-- name: Download and install gVisor runsc binary
-  ansible.builtin.get_url:
-    url: "{{ podman_gvisor_binary_url }}"
-    dest: /usr/local/bin/runsc
-    mode: '0755'
+- name: Create apt's keyring directory
+  ansible.builtin.file:
+    path: "{{ podman_gvisor_keyring | dirname }}"
+    state: directory
     owner: root
     group: root
-  when:
-    - podman_gvisor_enabled | default(true)
-    - not podman_gvisor_runsc_stat.stat.exists
+    mode: '0755'
+  when: podman_gvisor_enabled | default(true)
+
+# 0644: apt reads it as _apt, and gpg would have written 0640.
+- name: Add the gVisor signing key
+  ansible.builtin.get_url:
+    url: "{{ podman_gvisor_key_url }}"
+    dest: "{{ podman_gvisor_keyring }}"
+    owner: root
+    group: root
+    mode: '0644'
+  when: podman_gvisor_enabled | default(true)
+
+- name: Add the gVisor apt repository
+  ansible.builtin.apt_repository:
+    repo: "{{ podman_gvisor_apt_repo }}"
+    filename: gvisor
+    state: present
+  when: podman_gvisor_enabled | default(true)
+
+- name: Install the gVisor sandbox runtime
+  ansible.builtin.apt:
+    name: runsc
+    state: present
+    update_cache: true
+  when: podman_gvisor_enabled | default(true)
 
 - name: Deploy gVisor runsc rootless wrapper script
   ansible.builtin.template:
     src: runsc-wrapper.j2
-    dest: /usr/local/bin/runsc-wrapper
+    dest: "{{ podman_gvisor_wrapper }}"
     owner: root
     group: root
     mode: '0755'
@@ -109,9 +111,9 @@
     mode: '0644'
   when: podman_gvisor_enabled | default(true)
 
-- name: Get harness user UID
+- name: Get agent user UID
   ansible.builtin.command:
-    cmd: "id -u {{ podman_gvisor_harness_name }}"
+    cmd: "id -u {{ podman_gvisor_agent_name }}"
   register: podman_gvisor_uid_result
   changed_when: false
 
@@ -119,18 +121,18 @@
   ansible.builtin.file:
     path: "/run/user/{{ podman_gvisor_uid_result.stdout }}"
     state: directory
-    owner: "{{ podman_gvisor_harness_name }}"
-    group: "{{ podman_gvisor_harness_name }}"
+    owner: "{{ podman_gvisor_agent_name }}"
+    group: "{{ podman_gvisor_agent_name }}"
     mode: '0700'
 
-- name: Enable and start rootless Podman socket for harness user
+- name: Enable and start rootless Podman socket for agent user
   ansible.builtin.systemd_service:
     name: podman.socket
     scope: user
     state: started
     enabled: true
   become: true
-  become_user: "{{ podman_gvisor_harness_name }}"
+  become_user: "{{ podman_gvisor_agent_name }}"
   environment:
     XDG_RUNTIME_DIR: "/run/user/{{ podman_gvisor_uid_result.stdout }}"
     DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ podman_gvisor_uid_result.stdout }}/bus"

@@ -26,7 +26,7 @@ table inet agent_egress {
 {% endfor %}
 {% endif %}
 
-    # Loopback only. Subuid ranges cover --network=host containers; others exit as the harness uid.
+    # Loopback only. Subuid ranges cover --network=host containers; others exit as the agent uid.
     meta skuid { {{ agent_egress_uids }} } ip daddr != 127.0.0.0/8 \
       limit rate {{ agent_egress_log_rate }} burst {{ agent_egress_log_burst }} packets \
       log prefix "{{ agent_egress_log_prefix }}"

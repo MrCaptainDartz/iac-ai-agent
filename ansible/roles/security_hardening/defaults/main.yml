@@ -1,10 +1,10 @@
 ---
 # defaults file for security_hardening
-security_hardening_harness_name: "{{ harness_name | default('hermes') }}"
+security_hardening_agent_name: "{{ agent_name }}"
 security_hardening_admin_user: "{{ ansible_user }}"
 security_hardening_ssh_allowed_users:
-  - "{{ ansible_user }}"
-  - "{{ harness_name | default('hermes') }}"
+  - "{{ security_hardening_admin_user }}"
+  - "{{ security_hardening_agent_name }}"
 security_hardening_ssh_permit_root_login: "no"
 security_hardening_ssh_password_authentication: "no"
 security_hardening_ssh_allow_tcp_forwarding: "{{ 'yes' if (ssh_allow_tcp_forwarding | default(false)) else 'no' }}"

@@ -6,7 +6,7 @@ git_broker_user: git-broker
 git_broker_home: "/var/lib/{{ git_broker_user }}"
 git_broker_service_name: git-broker-ssh
 git_broker_ssh_port: 2222
-git_broker_harness_name: "{{ harness_name | default('hermes') }}"
+git_broker_agent_name: "{{ agent_name }}"
 git_broker_memory_max: "64M"
 git_broker_root: /opt/git-broker
 git_broker_bin_dir: "{{ git_broker_root }}/bin"
@@ -82,10 +82,11 @@ git_broker_merge_allowed: >-
            else (git_broker_merge_whitelist
                  | map('regex_replace', '^/', '') | map('regex_replace', '\.git$', '') | list)) }}
 # One regex per refused repository: a regex location wins over the prefix that admits the POST.
+# `/*$`, not `$`: measured, `/pulls/1/merge/` reached the forge's merge handler without it.
 git_broker_merge_refused: >-
   {{ (git_broker_api_repo_names | difference(git_broker_merge_allowed)
       | map('regex_replace', '^', git_broker_api_repo_prefix) | map('regex_escape')
-      | map('regex_replace', '^', '^') | map('regex_replace', '$', '/pulls/[0-9]+/merge$') | list) }}
+      | map('regex_replace', '^', '^') | map('regex_replace', '$', '/pulls/[0-9]+/merge/*$') | list) }}
 # One predicate for both halves: the relay that hands the endpoint out, the injection that serves it.
 git_broker_lfs_deployed: >-
   {{ (git_broker_lfs_enabled | bool) and (git_broker_lfs_upstream | length > 0)
@@ -114,11 +115,11 @@ git_broker_injections: >-
 
 # --- handed to the agent zone: addresses and a placeholder key, no credential ---
 
-git_broker_agent_ssh_dir: "/home/{{ git_broker_harness_name }}/.ssh"
+git_broker_agent_ssh_dir: "/home/{{ git_broker_agent_name }}/.ssh"
 git_broker_agent_key: "{{ git_broker_agent_ssh_dir }}/id_ed25519_placeholder"
 git_broker_agent_known_hosts: "{{ git_broker_agent_ssh_dir }}/git_broker_known_hosts"
 git_broker_agent_ssh_alias: git-broker
-git_broker_agent_gitconfig: "/home/{{ git_broker_harness_name }}/.gitconfig"
+git_broker_agent_gitconfig: "/home/{{ git_broker_agent_name }}/.gitconfig"
 
 # The name the forge's LFS links carry: its LFS upstream's, never the SSH endpoint's. A third public name goes in git_broker_lfs_rewrite_extra.
 git_broker_lfs_link_host: "{{ git_broker_lfs_upstream | urlsplit('netloc') | default('', true) | trim }}"

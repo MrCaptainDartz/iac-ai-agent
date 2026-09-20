@@ -7,7 +7,7 @@ agent_egress_proxy_port: 8080
 agent_egress_proxy_service_name: egress-proxy
 agent_egress_proxy_user: "{{ trust_zone_user | default(broker_name | default('broker')) }}"
 agent_egress_proxy_home: "{{ trust_zone_home | default('/var/lib/' ~ agent_egress_proxy_user) }}"
-agent_egress_proxy_harness_name: "{{ harness_name | default('hermes') }}"
+agent_egress_proxy_agent_name: "{{ agent_name }}"
 agent_egress_proxy_version: "12.2.3"
 agent_egress_proxy_python: "3.12"
 agent_egress_proxy_memory_max: "512M"

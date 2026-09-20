@@ -1,9 +1,16 @@
 ---
 # defaults file for podman_gvisor
-podman_gvisor_harness_name: "{{ harness_name | default('hermes') }}"
+podman_gvisor_agent_name: "{{ agent_name }}"
 podman_gvisor_enabled: "{{ gvisor_enabled | default(true) }}"
 podman_gvisor_default: "{{ gvisor_default | default(true) }}"
-podman_gvisor_binary_url: "https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/runsc"
+# gVisor ships no per-platform binary any more: its apt repository is the documented route.
+podman_gvisor_key_url: "https://gvisor.dev/archive.key"
+podman_gvisor_keyring: "/etc/apt/keyrings/gvisor-archive-keyring.asc"
+podman_gvisor_apt_arch: "{{ 'amd64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
+podman_gvisor_apt_repo: "deb [arch={{ podman_gvisor_apt_arch }} signed-by={{ podman_gvisor_keyring }}] https://storage.googleapis.com/gvisor/releases release main"
+# The package installs runsc and the sidecars it looks for in gvisor-bin/, next to itself.
+podman_gvisor_binary: "/usr/bin/runsc"
+podman_gvisor_wrapper: "/usr/local/bin/runsc-wrapper"
 # gVisor's host stack instead of its netstack: required for --network=host to work at all.
 podman_gvisor_hostinet: false
 # Default --network mode for every container ("" leaves the choice to Podman).

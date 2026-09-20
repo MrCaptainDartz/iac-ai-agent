@@ -2,6 +2,8 @@
 trust_zone_enabled: true
 trust_zone_user: "{{ broker_name | default('broker') }}"
 trust_zone_home: "/var/lib/{{ trust_zone_user }}"
+# The agent account, the other zone: never this one.
+trust_zone_agent_name: "{{ agent_name }}"
 # Stopped before the user is deleted: systemd would keep restarting a service running as it.
 trust_zone_dependent_units:
   - "{{ inference_gateway_service_name | default('inference-gateway') }}"

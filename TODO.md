@@ -12,7 +12,7 @@ Document récapitulatif : état déployé, modèle de composants, et feuille de 
 
 Fournir une **sandbox d'exécution pour agent IA**, réutilisable et opensourcable, avec trois propriétés non négociables :
 
-1. **Harness-agnostic.** Hermes, OpenClaw, Smolagents, ou n'importe quoi d'autre. Le socle ne présuppose rien du harnais : il sécurise l'environnement d'exécution autour de lui, et l'installation est un **provider interchangeable**. `harness_name` est une variable (déjà propagée partout, ex. `podman_gvisor_harness_name: "{{ harness_name | default('hermes') }}"`). Aucun chemin, nom d'unité ou utilisateur ne doit être codé en dur.
+1. **Harness-agnostic.** Hermes, OpenClaw, Smolagents, ou n'importe quoi d'autre. Le socle ne présuppose rien du harnais : il sécurise l'environnement d'exécution autour de lui, et l'installation est un **provider interchangeable**. `agent_name` est une variable (déjà propagée partout, ex. `podman_gvisor_agent_name: "{{ agent_name }}"`). Aucun chemin, nom d'unité ou utilisateur ne doit être codé en dur.
 2. **Composable.** Chaque capacité est un rôle activable par un flag, dans le style existant (`gvisor_enabled`, `ollama_enabled`, `security_hardening_*_enabled`). Rien d'obligatoire au-delà du socle.
 3. **Sans spécificité de déploiement.** Aucune valeur propre à une installation dans le code ou la doc : hôtes, IP, modèles, providers, allowlists, entrypoints et clés sont des variables. Un utilisateur doit pouvoir déployer sans modifier un template.
 
@@ -65,7 +65,7 @@ Le socle d'isolation multi-couches est en place. **« Déployé » ne veut pas d
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
 │  │  VM Ubuntu Server (UFW Rate-Limit + Fail2ban + Auto-Upgrades)          │  │
 │  │                                                                        │  │
-│  │   ZONE AGENT — NON FIABLE        uid={{ harness_name }} (0750)         │  │
+│  │   ZONE AGENT — NON FIABLE        uid={{ agent_name }} (0750)           │  │
 │  │   • Harnais IA (processus nu, PAS dans gVisor) — installé en Phase 8   │  │
 │  │   • Sudoers restreint : restart uniquement · limits.d anti-DoS         │  │
 │  │   • Python via uv · Node.js via NVM · Docker/Compose compat            │  │
@@ -134,8 +134,8 @@ Chaque composant est un rôle activable, dans le style existant.
 ### Variables (conventions existantes)
 
 ```yaml
-# --- Harnais (existant, agnostique) ---
-harness_name: "hermes"              # hermes, openclaw, smolagents, ...
+# --- Zone agent (existant, agnostique) ---
+agent_name: "agent"                # agent, sre-agent, sandbox1, ...
 # L'entrypoint est la seule chose à renseigner côté harnais (Phase 8) :
 # harness_exec_start: "/usr/local/bin/uv run python main.py"
 
@@ -221,7 +221,7 @@ harness_service_enabled: true
 
 L'allowlist devient **structurelle** (topologie) au lieu d'être content-based : si la zone agent n'a pas de route, il n'y a rien à filtrer au L7. C'est le socle de la Phase 3.
 
-**Ne dépend que de l'uid du harnais** (`harness_user` est déployé), pas de l'installation du harnais ni de son unité (Phase 8).
+**Ne dépend que de l'uid du harnais** (`agent_user` est déployé), pas de l'installation du harnais ni de son unité (Phase 8).
 
 **Option A retenue** — table nftables dédiée, testable seule, indépendante d'UFW. UFW garde l'ingress et son propre OUTPUT ; les deux coexistent.
 
@@ -250,7 +250,7 @@ table inet agent_egress {
 }
 ```
 
-`<uids>` = uid du harnais **+ ses plages subuid**, résolus à l'exécution (`id -u`, `/etc/subuid`) : l'uid n'est pas fixé par `harness_user`.
+`<uids>` = uid du harnais **+ ses plages subuid**, résolus à l'exécution (`id -u`, `/etc/subuid`) : l'uid n'est pas fixé par `agent_user`.
 
 **Ce que les mesures ont établi** — plusieurs hypothèses sont tombées :
 
@@ -281,10 +281,9 @@ table inet agent_egress {
 
 **Constaté au passage, non traité ici :**
 
-- **Plages subuid/subgid dupliquées** : `hermes` en a deux, dont une **partagée avec `ubuntu`** — l'inclusion subuid filtre donc aussi ses conteneurs. À dédupliquer un jour, mais changer une plage subuid sur une machine avec du stockage conteneur impose un `chown` du store : décision à part.
 - **`-e agent_egress_filter_enabled=false`** passe la *chaîne* `"false"`, qu'Ansible refuse comme conditionnel. Utiliser la forme JSON. Vaut pour tous les flags `*_enabled`.
 - **`nvm` exécute `npm update -g` sans condition** à chaque run : c'est ce qui rend la levée du filtre nécessaire, et une surface de supply chain à revoir (Phase 6).
-- **`sudo -u {{ harness_name }}` depuis `/home/ubuntu`** échoue (`0750` sur les deux homes) : préfixer par `cd /tmp` ou `-H`.
+- **`sudo -u {{ agent_name }}` depuis `/home/ubuntu`** échoue (`0750` sur les deux homes) : préfixer par `cd /tmp` ou `-H`.
 
 #### ✅ Phase 2 — Gateway d'inférence *(faite)*
 
@@ -318,7 +317,7 @@ Implémentation : **litellm** (`inference-gateway.service`), HTTP simple sur `12
 
 **Ordre dans le play** : `trust_zone` puis `inference_gateway`, après `ollama` et avant `agent_egress` qui reste **dernier**.
 
-**Corrigé après une review externe :** `api_base` n'est plus appliqué qu'aux modèles du provider **local** (`ollama`/`ollama_chat`) — un modèle distant partait sinon vers l'URL locale d'Ollama ; les règles de blocage du port amont couvrent désormais **IPv6** (`ip6 daddr ::1`, compteur vérifié à 4 paquets) alors que la leçon IPv6 de la Phase 1 n'y avait pas été appliquée ; un **pré-vol** dans `pre_tasks` valide la table d'alias **avant** la levée du filtre, pour qu'un run voué à l'échec n'ouvre pas la zone agent ; `broker_name == harness_name` est refusé (les deux zones fusionneraient sous un uid).
+**Corrigé après une review externe :** `api_base` n'est plus appliqué qu'aux modèles du provider **local** (`ollama`/`ollama_chat`) — un modèle distant partait sinon vers l'URL locale d'Ollama ; les règles de blocage du port amont couvrent désormais **IPv6** (`ip6 daddr ::1`, compteur vérifié à 4 paquets) alors que la leçon IPv6 de la Phase 1 n'y avait pas été appliquée ; un **pré-vol** dans `pre_tasks` valide la table d'alias **avant** la levée du filtre, pour qu'un run voué à l'échec n'ouvre pas la zone agent ; `broker_name == agent_name` est refusé (les deux zones fusionneraient sous un uid).
 
 **Deux points de cette review ont été rejetés, mesures à l'appui** — à ne pas re-litiger sans fait nouveau :
 
@@ -334,6 +333,7 @@ Implémentation : **litellm** (`inference-gateway.service`), HTTP simple sur `12
 - **Ordre canonique du préfixe** et **compression de la partie volatile** : ce sont des contrats du **harnais** — c'est le client qui construit la requête. Un proxy qui réécrit le contenu envoyé est un piège de débogage. À documenter en Phase 8, pas à implémenter ici.
 - **Quotas de tokens** : litellm ne les applique pas sans Redis (suivi d'usage) ni base de données (budgets, clés virtuelles). Ce serait un composant de plus, avec son propre secret, pour une borne que la Phase 7 peut obtenir par l'observation. Décision : **pas de quota**, mesures ci-dessus à l'appui.
 - **Redaction** : `turn_off_message_logging: true` est le défaut, mais aucun callback n'est configuré — c'est une protection **prospective**, pas un contrôle actif. Dit tel quel plutôt que présenté comme acquis.
+- **Inférence cloud sans compte Ollama** : un modèle `:cloud` s'enregistre sans compte (`ollama pull` le déclare), mais l'inférence en exige un — mesuré le 20/09/2026, `POST /v1/chat/completions` sur un alias cloud répond **401**, relayé fidèlement par le gateway, parce que `ollama_signin_required: false` et aucune `api_key` par entrée. **Choix assumé** : la connexion est interactive, donc incompatible avec un provisionnement automatique. Un modèle strictement local n'est pas concerné — et la chaîne agent → gateway → amont, elle, est prouvée par ce même échange.
 
 **Trouvaille à traiter en Phase 7.** Les routes d'administration de litellm sont sur le loopback, donc **joignables par l'agent** (`/health`, `/metrics`, `/key/*`). Sans base de données, `model_list` n'est pas modifiable à chaud et la clé du provider n'est jamais renvoyée : l'impact est faible, mais c'est un chemin que l'agent a et que `make audit` doit connaître. L'UI d'admin est désactivée.
 
@@ -553,7 +553,7 @@ Cas d'usage : agent SRE. **Pas de MITM, pas de CA interne** — le harnais parle
 | Ce que git envoie | `git-upload-pack '/chemin'` / `git-receive-pack '/chemin'` — verbe + chemin **entre guillemets simples** ; et `git-lfs-authenticate /chemin upload`, **sans** guillemets. D'où un relais qui découpe `argv[2]` et retire les guillemets, plutôt qu'un motif regex. |
 | `restrict` dans `authorized_keys` | **Honoré** : « PTY allocation request failed on channel 0 ». |
 | Les refus sont exploitables | `logger -t git-broker` → lisibles dans le journal (`refused: …`) : c'est la matière de la Phase 7. |
-| La porte d'admin réutilisable | **Non** : `AllowUsers ubuntu hermes` — le compte de confiance n'y est pas admis, et l'y ajouter lierait deux rôles. D'où l'instance dédiée. |
+| La porte d'admin réutilisable | **Non** : `AllowUsers ubuntu agent` — le compte de confiance n'y est pas admis, et l'y ajouter lierait deux rôles. D'où l'instance dédiée. |
 | `insteadOf` suffit pour ramener LFS sur le loopback | **Faux** : `git lfs env` montre que l'endpoint *batch* déduit du remote n'est **pas** réécrit (`Endpoint=https://git-broker/…`), alors que `lfs.url` l'est. Et `lfs.url` est global — il ne vaut que pour un dépôt. |
 | Le relais doit répondre `git-lfs-authenticate` | **Oui, et c'est la voie propre** : git-lfs appelle bien le serveur SSH, **et** il utilise le `href` renvoyé — mesuré, la requête batch est arrivée sur un listener local et non sur la forge, **sans en-tête `Authorization`** (`auth=None`), donc c'est le proxy qui l'injecte. La réponse ne contient qu'une adresse. |
 | Le transfert LFS en SSH pur (`git-lfs-transfer`) | **Refusé par le relais, et git-lfs se replie seul** sur le HTTP : c'est le comportement voulu, et la porte reste à un seul verbe. |
@@ -703,7 +703,7 @@ Reste ouvert : une clé **déjà présente mais non enregistrée** sur la forge 
 
 #### 🌟 Phase 6 — Chaîne d'approvisionnement
 
-- [ ] **`runsc` est téléchargé depuis `.../release/latest/...` sans `checksum:`** (non épinglé, non vérifié) → épingler la version + `checksum:`. Idem pour les installeurs `uv` et NVM.
+- [ ] **`runsc` vient maintenant d'un dépôt apt tiers signé** (corrigé le 20/09/2026) : apt vérifie la signature du dépôt et les sommes des paquets, donc l'épinglage par `checksum:` n'a plus d'objet — restent deux points à trancher ici : la **priorité** du dépôt gVisor (500, comme `universe`, qui livre aussi un `runsc` : apt prend la version la plus haute, `20260914.0` contre `0.0~20240729.0-7`) et le sort de la **clé** versée dans `/etc/apt/keyrings`. Idem pour les installeurs `uv` et NVM, eux toujours téléchargés sans vérification.
 - [ ] Images conteneurs : épingler les digests ; envisager un miroir interne + politique `cosign`.
 - [ ] Les `pip install` / `npm install` sont un point d'entrée pour un agent injecté : au minimum les journaliser, idéalement les restreindre à un miroir. Concerne aussi **`npm update -g`**, que `nvm` lance **sans condition à chaque run** (constaté en Phase 1) — c'est ce qui oblige à lever le filtre d'egress pendant le provisioning.
 
@@ -714,6 +714,7 @@ Reste ouvert : une clé **déjà présente mais non enregistrée** sur la forge 
 - [ ] Règles auditd `execve` sur l'uid du harnais : rend visible l'exploitation d'une injection en RCE.
 - [ ] Logs des composants de la zone de confiance **et du proxy L7** → cible commune, **non inscriptible par la zone agent**. Principal artefact de détection d'exfiltration — **piste d'audit des prompts comprise**, que le gateway ne fournit pas aujourd'hui (`DETAILED_DEBUG` n'est qu'un flux de débogage, 135 lignes par requête). Le proxy produit déjà sa part (une ligne de politique par requête, `egress-allow`/`egress-deny`) : reste à l'expédier.
 - [ ] Expédition distante des logs (une VM compromise ne doit pas pouvoir effacer ses traces).
+- [ ] **Le contrôle de santé du README suppose l'image déjà en cache** : sur une zone agent filtrée, `docker run --rm alpine …` ne peut pas *tirer* l'image — le registre n'est pas dans l'allowlist du proxy L7, et l'environnement du proxy n'existe que dans les shells de connexion. Mesuré le 20/09/2026 : le conteneur ne démarre que si l'opérateur a pré-tiré l'image (la preuve gVisor a été faite en exportant l'image par `root`, puis en la chargeant par l'agent, sans réseau). À trancher : pré-tirage documenté, ou registre déclaré dans l'allowlist avec `HTTP_PROXY` porté par le processus.
 - [ ] Auditer ce que les routes d'admin du gateway exposent à l'agent (`/health`, `/metrics`, `/key/*`) : chemin connu depuis la Phase 2, impact faible sans base de données, mais c'est un chemin que l'agent a.
 - [ ] `make audit` qui **assère** l'état réel : règles d'egress (et **table `agent_egress` chargée** — sans quoi un run interrompu laisse la zone agent ouverte sans le dire), UFW, **`inference-gateway` actif sous l'utilisateur de la zone de confiance**, durcissement des unités, absence de credential hors zone de confiance.
 - [ ] Alerting sur anomalies (nouvelle destination, upload volumineux, nouveau processus).
@@ -732,22 +733,23 @@ Reste ouvert : une clé **déjà présente mais non enregistrée** sur la forge 
 
 **Pourquoi cette phase en dernier.** L'unité systemd n'est le prérequis d'aucune autre phase : le contrôle d'egress (Phase 1) travaille sur l'**uid**, pas sur le service. La déplacer ici permet d'écrire un `ExecStart` qui pointe sur quelque chose de réellement installé, et de vérifier le durcissement obtenu sur une unité qui démarre.
 
-- [ ] **Arrêter le harnais avant de lever le filtre d'egress** — décision du déploiement, et elle remplace la piste « déplacer la levée dans le rôle `nvm` avec un `block`/`always` » (écartée : elle impose un contrat par rôle à retenir, et la levée au niveau du play redeviendra nécessaire pour les mises à jour). Le play lève le filtre pour toute sa durée ; sans harnais en marche, la fenêtre cesse d'être **exploitable** — un agent antagoniste peut guetter une porte ouverte, pas s'en servir si on l'a arrêté. Et le mode d'échec s'inverse : un play interrompu laisse l'agent **arrêté** jusqu'au prochain run, au lieu d'un agent **non filtré** — *fail-closed* au lieu de *fail-open*. À arrêter : `{{ harness_name }}.service` **et ce qu'il a lancé** (ses conteneurs tournent sous ses uid subordonnés, un `systemctl stop` ne les touche pas). Le redémarrage vient **après** la réapplication du ruleset, en dernier geste du play.
-- [ ] **Créer le rôle `harness_hermes`** — il n'existe pas aujourd'hui : `hermes` n'apparaît dans le dépôt que comme *nom* (défaut de `harness_name`, exemple du README), jamais comme installation. Rôle à concevoir **au moment de cette phase** et pas avant : il n'est le prérequis d'aucune autre, et ses deux paramètres déterminants ne sont pas connus à ce stade.
+- [ ] **Arrêter le harnais avant de lever le filtre d'egress** — décision du déploiement, et elle remplace la piste « déplacer la levée dans le rôle `nvm` avec un `block`/`always` » (écartée : elle impose un contrat par rôle à retenir, et la levée au niveau du play redeviendra nécessaire pour les mises à jour). Le play lève le filtre pour toute sa durée ; sans harnais en marche, la fenêtre cesse d'être **exploitable** — un agent antagoniste peut guetter une porte ouverte, pas s'en servir si on l'a arrêté. Et le mode d'échec s'inverse : un play interrompu laisse l'agent **arrêté** jusqu'au prochain run, au lieu d'un agent **non filtré** — *fail-closed* au lieu de *fail-open*. À arrêter : `{{ agent_name }}.service` **et ce qu'il a lancé** (ses conteneurs tournent sous ses uid subordonnés, un `systemctl stop` ne les touche pas). Le redémarrage vient **après** la réapplication du ruleset, en dernier geste du play.
+- [ ] **Créer le rôle `harness_hermes`** — il n'existe pas aujourd'hui : `hermes` n'apparaît dans le dépôt que comme *nom de provider* (`harness_provider`) et exemple du README, jamais comme installation. Rôle à concevoir **au moment de cette phase** et pas avant : il n'est le prérequis d'aucune autre, et ses deux paramètres déterminants ne sont pas connus à ce stade.
   - À trancher alors : le **mécanisme d'installation** (dépôt git à cloner, `uv tool install` / `pipx` / `npm -g`, binaire…) et l'**entrypoint** réel (`harness_exec_start`).
   - Il doit installer dans la zone agent et poser `harness_exec_start` + `harness_workdir` par défaut. **Seul provider livré**, volontairement.
 - [ ] Documenter la convention de provider (§ ci-dessus) et les **exemples** d'`harness_exec_start` pour d'autres harnais — en commentaire, jamais comme défaut.
-- [ ] Rôle `harness_service` : unité `{{ harness_name }}.service`, tout en variables. Indépendant du provider.
+- [ ] Rôle `harness_service` : unité `{{ agent_name }}.service`, tout en variables. Indépendant du provider.
+- [ ] **Cette unité doit porter l'environnement du proxy L7 elle-même** : `/etc/profile.d/egress-proxy.sh` ne parle qu'aux shells de connexion (son propre commentaire le dit), et un service systemd ne source rien de tel — sans `Environment=` (ou `~/.config/environment.d/` pour un service *user*), le harnais n'aura aucun chemin d'egress.
 
 ```ini
 [Unit]
-Description=AI Agent Harness ({{ harness_name }})
+Description=AI Agent Harness ({{ agent_name }})
 After=network-online.target
 
 [Service]
 Type=simple
-User={{ harness_name }}
-Group={{ harness_name }}
+User={{ agent_name }}
+Group={{ agent_name }}
 WorkingDirectory={{ harness_home }}
 ExecStart={{ harness_exec_start }}      # ex. /usr/local/bin/uv run python main.py
 Restart=always
@@ -788,9 +790,9 @@ WantedBy=multi-user.target
 
 - [ ] **Le harnais exécute ses commandes dans un conteneur** (constat de la Phase 4) : l'outillage vit donc dans **l'image**, pas dans la zone agent — un `kubectl` installé nu ne servirait à rien. C'est l'image qui porte le client du broker, et elle n'atteint les services loopback (broker, proxy L7) qu'en `--network=host`, avec le `$HOME` du harnais monté (kubeconfig bidon, variables de proxy). À trancher ici : le provider livre-t-il une image par défaut, ou documente-t-il seulement la recette ?
 - [ ] **Reprendre l'environnement du proxy dans l'unité** : `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` et, au niveau 2, `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`NODE_EXTRA_CA_CERTS`. `/etc/profile.d` n'atteint ni une unité systemd ni une session SSH non interactive (`ssh harnais@vm "curl …"`) — le fichier de profil de `agent_egress_proxy` ne sert qu'aux sessions interactives. À vérifier aussi : que la pile HTTP du harnais honore réellement ces variables.
-- [ ] Mettre à jour le sudoers scopé (`systemctl restart {{ harness_name }}`) : déployé par `harness_user`, il référence une unité qui n'existe qu'à partir d'ici.
-- [ ] `security_hardening` copie les `authorized_keys` de l'admin vers le harnais (même clé pour `ubuntu@` **et** `{{ harness_name }}@`) : rendre ce comportement **optionnel**, et documenter que ça fusionne les identités.
-- [ ] **Vérifier le durcissement obtenu** : `systemd-analyze security {{ harness_name }}.service`, avec un score cible documenté. (C'est le bon endroit pour cette mesure : elle porte sur l'unité créée ici.)
+- [ ] Mettre à jour le sudoers scopé (`systemctl restart {{ agent_name }}`) : déployé par `agent_user`, il référence une unité qui n'existe qu'à partir d'ici.
+- [ ] `security_hardening` copie les `authorized_keys` de l'admin vers le harnais (même clé pour `ubuntu@` **et** `{{ agent_name }}@`) : rendre ce comportement **optionnel**, et documenter que ça fusionne les identités.
+- [ ] **Vérifier le durcissement obtenu** : `systemd-analyze security {{ agent_name }}.service`, avec un score cible documenté. (C'est le bon endroit pour cette mesure : elle porte sur l'unité créée ici.)
 - [ ] `harness_service_enabled: false` doit laisser la VM dans son état actuel (la sandbox complète, sans service).
 
 ### Outillage
@@ -830,6 +832,9 @@ WantedBy=multi-user.target
 | Nettoyage des blocs d'injection à deux bornes (`< 1` ou `> N`) | Le `< 1` **n'est pas mort** : `int` rend **0** pour un nom qui n'est pas un nombre, et c'est la seule clause qui retire un `.conf` étranger. La condition dit donc son intention une fois — `not in range(1, N+1)` — au lieu de deux bornes dont l'une paraît morte sans l'être. | Le jour où le rôle cesserait d'écrire `1.conf`…`N.conf`. |
 | Clause `/+$` du contrôle d'unicité des dépôts (`git_broker_repos`) | **Morte** : l'item voisin de la même assertion refuse tout `/` final (`select('search', '/$') | length == 0`), donc retirer les slashes finaux ne peut jamais changer le verdict — mesuré sur huit formes d'entrée, slash final et doublon avec slash final compris (verdicts identiques). Le message d'échec annonçait pourtant « a trailing slash are dropped » : il est corrigé, et la condition tient désormais sur **une ligne** (143 car.). | Le jour où l'item « pas de slash final » quitterait ce `that:`. |
 | Ajouter le verbe `git-upload-archive` au relais (`git archive --remote`) | **Forgejo l'accepte** (`allowedCommands` → `AccessModeRead`, comme `git-upload-pack`), donc l'ajouter ouvrirait réellement quelque chose — et ça n'apporterait rien : par défaut `git-upload-archive` ne sert qu'un arbre pointé **directement par une ref**, ou un sous-arbre `ref:path`, c'est-à-dire exactement ce que l'agent a déjà par `clone`. Le seul gain serait la bande passante d'une extraction sans copie, or l'agent est précisément celui qui doit en détenir une pour proposer une branche. Et le rayon dépend d'un réglage **côté forge** — `uploadarchive.allowUnreachable`, défaut `false`, dont git dit lui-même qu'il protège « the privacy of objects that have been removed from history but may not yet have been pruned » : à `true`, un client demande des sha1 arbitraires, donc l'historique réécrit. Enfin GitHub **refuse** ce verbe et le git-HTTP ne le transporte pas : ce serait une capacité dépendante de la forge, à l'inverse de la raison qui a fait choisir SSH. | Le jour où un harnais exigerait `git archive --remote` (extraire un sous-arbre d'un très gros dépôt sans le cloner) : l'implémentation est **un mot** dans le `case` du relais — `$# -eq 2` tient, les arguments de l'archive passent dans le protocole — et il faut alors **vérifier sur la forge** que `uploadarchive.allowUnreachable` est à `false`. |
+| Reprise (migration) d'une VM déjà provisionnée après le renommage du compte (`harness_name` → `agent_name`, défaut `agent`) | Le compte est créé **par nom**, jamais renommé : une reprise devrait connaître le nom précédent et le raisonner dans chaque rôle, pour trois artefacts indexés par ce nom (`/etc/subuid` et `/etc/subgid` en `lineinfile`, `/etc/sudoers.d/<nom>`, `/var/lib/systemd/linger/<nom>`) — et la VM de dev se recrée. | Le jour où une VM **en service** devrait changer de nom de compte : `userdel -r` de l'ancien, retrait des trois artefacts, puis le play. |
+| Écrire nous-mêmes la plage subuid/subgid de l'agent (`lineinfile`, plage fixe `100000:65536`) | **Retiré le 20/09/2026** : `useradd` alloue déjà une plage à la création — `/etc/login.defs` de l'image la déclare (`SUB_UID_MIN 100000`, `SUB_UID_COUNT 65536`, idem GID), vérifié par un compte jetable (`useradd` écrit la ligne, `userdel -r` la retire). La plage fixe du rôle était **celle d'`ubuntu`** : le jeu d'uids filtré incluait donc `100000-165535`, ce qui filtrait les conteneurs d'`ubuntu` avec ceux de l'agent, et faisait partager un espace d'uid aux deux acteurs. | Le jour où une image cesserait de déclarer `SUB_UID_*` : `podman` refuse alors de démarrer un conteneur rootless (échec bruyant, pas un filtre contourné), et l'allocation redevient une tâche explicite. |
+| Télécharger `runsc` en binaire depuis `…/release/latest/<arch>/runsc` | **Morte** : depuis le 16/09/2026 gVisor ne publie plus de binaire par plateforme, seulement `gvisor.tar.zstd` et `gvisor.tar.bz2` (avec leurs `.sha512`) — mesuré dans le bucket, cinq versions datées comprises, toutes en 404. Le rôle prend la voie que la doc amont qualifie de *future-proof*, son **dépôt apt signé** : `runsc` en `/usr/bin`, les sidecars dans `/usr/bin/gvisor-bin/` (que `runsc` cherche à côté de son propre binaire), un `postinst` qui ne touche qu'à Docker s'il est présent, et une clé ASCII en `0644` — mesuré : `gpg --dearmor` la crée en `0640`, illisible par `_apt`, et apt refuse alors le dépôt. | Jamais : l'ancienne arborescence n'existe plus. L'archive seule (`sha512sum -c`, `tar --zstd`) reste la solution documentée à rouvrir si une politique interdisait un jour une source apt tierce. |
 
 ---
 
@@ -839,7 +844,7 @@ WantedBy=multi-user.target
 
 ```bash
 ssh <admin>@<vm_ip>              # admin
-ssh {{ harness_name }}@<vm_ip>   # zone agent
+ssh {{ agent_name }}@<vm_ip>   # zone agent
 ```
 
 ### 🚑 Accès perdu, sans console
@@ -857,52 +862,54 @@ qm guest exec <vmid> -- /bin/bash -c "echo '<compte>:<mot-de-passe>' | chpasswd"
 
 **Le piège, mesuré** : la prison SSH est en `mode = aggressive` — une connexion qui **ne s'authentifie pas** compte déjà comme un échec. Cinq échecs dans les dix minutes précédentes (un test de port répété suffit, et une VM qui redémarre en produit aussi) valent **une heure de ban**. D'où `security_hardening_fail2ban_ignoreip`, qui doit nommer le poste de contrôle.
 
+**L'autre piège, mesuré** : `ufw limit 22/tcp` compte **6 connexions neuves par 30 s et par source** (`recent`, `hit_count 6`). Une rafale de sessions — une campagne de vérifications qui enchaîne les `ssh`, par exemple — se voit refuser la suivante, et le refus est un **`Connection refused` immédiat**, à ne pas confondre avec un ban : celui-ci retombe seul en une trentaine de secondes, là où le ban fail2ban tient une heure et exige `unbanip`.
+
 **Le second piège, mesuré** : l'`sshd` **système** garde les pénalités de source d'OpenSSH 10 (`persourcepenalties … authfail:5 min:15 max:600`). Une connexion qui n'authentifie pas compte comme un échec, chaque échec ajoute 5 s de refus **pour votre IP**, et un client qui réessaie en boucle (agent SSH vide, `BatchMode=yes`) **entretient** la pénalité : `Permission denied (publickey)` *après* que le serveur a reconnu la clé (`Server accepts key`). Il n'y a rien à débloquer — **attendre** une quinzaine de secondes suffit, et réessayer ne fait que prolonger. Preuve dans le journal : `journalctl -u ssh | grep srclimit`.
 
 ### 🧪 Vérifications de santé
 
 ```bash
 # Sandbox gVisor (conteneurs lancés par l'agent)
-ssh {{ harness_name }}@<vm_ip> "docker run --rm alpine uname -a"
+ssh {{ agent_name }}@<vm_ip> "docker run --rm alpine uname -a"
 # Attendu : Linux ... 4.19.0-gvisor ...
 
 # Gateway d'inférence (Phase 2), depuis la zone agent : les alias déclarés
-ssh {{ harness_name }}@<vm_ip> "curl -s http://127.0.0.1:4000/v1/models"
+ssh {{ agent_name }}@<vm_ip> "curl -s http://127.0.0.1:4000/v1/models"
 # Le port amont du provider est fermé à la zone agent — attendu en échec (rc=28)
-ssh {{ harness_name }}@<vm_ip> "curl -m 4 -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:11434/api/tags"
+ssh {{ agent_name }}@<vm_ip> "curl -m 4 -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:11434/api/tags"
 # Le port SSH de l'hôte (22) est fermé de la même façon — le drop est silencieux : ça EXPIRE au lieu de
 # refuser, donc un rc=124 est le filtre qui marche, pas une panne réseau
-ssh {{ harness_name }}@<vm_ip> 'timeout 4 bash -c "exec 3<>/dev/tcp/127.0.0.1/22"; echo rc=$?'   # attendu : rc=124
+ssh {{ agent_name }}@<vm_ip> 'timeout 4 bash -c "exec 3<>/dev/tcp/127.0.0.1/22"; echo rc=$?'   # attendu : rc=124
 ssh <admin>@<vm_ip> "nft list chain inet agent_egress output | grep -c 'dport 22'"              # attendu : 4 règles
 # Le gateway tourne-t-il bien hors de l'uid du harnais ?
 ssh <admin>@<vm_ip> "systemctl show inference-gateway -p User -p ActiveState"
 
 # Egress (Phase 1) : la zone agent ne sort pas, le loopback reste ouvert
-ssh {{ harness_name }}@<vm_ip> "curl -m 3 -sS -o /dev/null -w '%{http_code}\n' https://example.com"
+ssh {{ agent_name }}@<vm_ip> "curl -m 3 -sS -o /dev/null -w '%{http_code}\n' https://example.com"
 # Attendu : échec (résolution comprise).
 # Conteneur couvert par le même filtre :
-ssh {{ harness_name }}@<vm_ip> "podman run --rm alpine wget -T3 -q -O- http://1.1.1.1"
+ssh {{ agent_name }}@<vm_ip> "podman run --rm alpine wget -T3 -q -O- http://1.1.1.1"
 # Le filtre est-il RÉELLEMENT chargé ? (un run interrompu le laisse levé)
 ssh <admin>@<vm_ip> "sudo nft list table inet agent_egress"
 
 # Proxy egress L7 (Phase 3) : l'allowlist tient, et le proxy est le SEUL chemin
-ssh {{ harness_name }}@<vm_ip> "curl -m 5 -sS -x http://127.0.0.1:8080 https://<domaine_allowlisté>"
+ssh {{ agent_name }}@<vm_ip> "curl -m 5 -sS -x http://127.0.0.1:8080 https://<domaine_allowlisté>"
 # Attendu : 200. Hors allowlist ou destination interne : 403 (« CONNECT tunnel failed, response 403 »).
 # Sans proxy, la zone agent ne sort plus et ne résout plus : le proxy est bien le seul chemin.
-ssh {{ harness_name }}@<vm_ip> "curl -m 4 -sS -o /dev/null -w '%{http_code}\n' https://<domaine_allowlisté>"
-ssh {{ harness_name }}@<vm_ip> "getent hosts <domaine_allowlisté> || echo 'pas de résolution'"
+ssh {{ agent_name }}@<vm_ip> "curl -m 4 -sS -o /dev/null -w '%{http_code}\n' https://<domaine_allowlisté>"
+ssh {{ agent_name }}@<vm_ip> "getent hosts <domaine_allowlisté> || echo 'pas de résolution'"
 # Le proxy tourne-t-il hors de l'uid du harnais, et que décide-t-il ? (une ligne par requête)
 ssh <admin>@<vm_ip> "systemctl show egress-proxy -p User -p ActiveState; journalctl -u egress-proxy -g 'egress-(allow|deny)' -n 20"
 
 # Durcissement du harnais (après Phase 8)
-systemd-analyze security {{ harness_name }}.service
+systemd-analyze security {{ agent_name }}.service
 
 # Broker Kubernetes (Phase 4) : la zone agent n'a qu'une adresse, jamais le jeton
-ssh {{ harness_name }}@<vm_ip> "curl -s http://127.0.0.1:8001/api"
+ssh {{ agent_name }}@<vm_ip> "curl -s http://127.0.0.1:8001/api"
 # Attendu : la liste des versions de l'API. Une écriture est refusée DEUX fois : par le filtre du
 # proxy (403) puis par le RBAC ; les chemins secrets/exec/portforward le sont aussi.
-ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' -X DELETE http://127.0.0.1:8001/api/v1/namespaces/sre-agent/configmaps/x"
-ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8001/api/v1/namespaces/sre-agent/secrets"
+ssh {{ agent_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' -X DELETE http://127.0.0.1:8001/api/v1/namespaces/sre-agent/configmaps/x"
+ssh {{ agent_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8001/api/v1/namespaces/sre-agent/secrets"
 # Le broker tourne-t-il hors de l'uid du harnais, avec un jeton qui authentifie ?
 ssh <admin>@<vm_ip> "systemctl show k8s-broker -p User -p ActiveState"
 ssh <admin>@<vm_ip> "journalctl -u k8s-broker -n 20"
@@ -910,11 +917,11 @@ ssh <admin>@<vm_ip> "journalctl -u k8s-broker -n 20"
 kubectl --kubeconfig=ansible/files/k8s-broker.kubeconfig auth can-i --list
 
 # Broker git (Phase 5) : l'agent propose, ne détient rien, et n'obtient aucun shell
-ssh {{ harness_name }}@<vm_ip> "git ls-remote ssh://git-broker/<owner>/<repo>.git"
+ssh {{ agent_name }}@<vm_ip> "git ls-remote ssh://git-broker/<owner>/<repo>.git"
 # Attendu : les références du dépôt. La clé du harnais n'ouvre QUE le relais, et le relais ne rejoue
 # rien de ce qui arrive : un dépôt non déclaré, un shell, et tout argument surnuméraire sont refusés.
-ssh {{ harness_name }}@<vm_ip> "ssh git-broker id"                 # attendu : refusé
-ssh {{ harness_name }}@<vm_ip> "ssh git-broker \"git-upload-pack '/<owner>/<repo>.git' ; id\""   # attendu : refusé
+ssh {{ agent_name }}@<vm_ip> "ssh git-broker id"                 # attendu : refusé
+ssh {{ agent_name }}@<vm_ip> "ssh git-broker \"git-upload-pack '/<owner>/<repo>.git' ; id\""   # attendu : refusé
 ssh <admin>@<vm_ip> "journalctl -t git-broker -n 20"               # une ligne par refus
 # Les deux portes tournent hors de l'uid du harnais, sur le loopback seul
 ssh <admin>@<vm_ip> "systemctl show git-broker-ssh -p User -p ActiveState; systemctl show token-proxy -p User -p ActiveState"
@@ -923,22 +930,26 @@ ssh <admin>@<vm_ip> "ss -tlnp | grep -E '2222|8002'"
 # n'est pas routée : seuls les dépôts déclarés le sont, en lecture (GET sur le préfixe du dépôt, ce
 # qui inclut ce que la forge y expose : hooks, collaborateurs, logs de jobs — cf. risque 12) et en
 # proposition (GET/POST/PATCH sur /pulls et /issues, cf. git_broker_api_proposal_methods).
-ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>"          # attendu : 200
-ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' -X DELETE http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>"   # attendu : 403
-ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8002/api/v1/user/keys"                   # attendu : 404
+ssh {{ agent_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>"          # attendu : 200
+ssh {{ agent_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' -X DELETE http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>"   # attendu : 403
+ssh {{ agent_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8002/api/v1/user/keys"                   # attendu : 404
 # Les chemins déclarés sont BORNÉS : un dépôt dont le nom allonge un nom déclaré n'est pas routé
-ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>-x"       # attendu : 404
+ssh {{ agent_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>-x"       # attendu : 404
 # Et un chemin doublement encodé est refusé : l'emplacement est choisi sur l'URI normalisée, l'URI
 # brute part vers la forge, donc un %25 dit deux choses à deux endroits (--path-as-is, sinon curl
 # normalise). Le %2F, lui, reste admis : les deux côtés le lisent comme un séparateur (GitLab l'exige).
-ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' --path-as-is 'http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>/%252e%252e%252fx'"   # attendu : 403
+ssh {{ agent_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' --path-as-is 'http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>/%252e%252e%252fx'"   # attendu : 403
 # Le merge est fermé par le proxy (location regex, donc avant la location préfixe) — 403 attendu partout
-ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>/pulls/1/merge"   # attendu : 403
+ssh {{ agent_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>/pulls/1/merge"   # attendu : 403
 # La CRÉATION de PR reste ouverte : même famille de chemin, route et verbe différents — la réponse vient
 # alors de la forge (4xx), pas du proxy (403), et c'est ça qui distingue les deux
-ssh {{ harness_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' -X POST -d '{}' http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>/pulls"   # attendu : 4xx de la forge
-# Deux variantes adverses à essayer sur la forge le jour où on valide le garde : `/pulls/1/merge/`
-# (slash final) et `/pulls/1%2Fmerge` (séparateur encodé) — si l'une franchit, la regex doit l'inclure
+ssh {{ agent_name }}@<vm_ip> "curl -s -o /dev/null -w '%{http_code}\n' -X POST -d '{}' http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>/pulls"   # attendu : 4xx de la forge
+# Famille du garde, essayée sur la forge le 20/09/2026 : `/pulls/1%2Fmerge` était déjà refusée, mais
+# `/pulls/1/merge/` FRANCHISSAIT le garde — le handler de merge de la forge répondait à une requête
+# admise (`{"Do":"pas-un-do"}` → 422 de validation du champ `Do`), donc un corps valide aurait mergé.
+# Motif corrigé en `merge/*$` : les huit formes (slash final simple, double, `/./`, `%2F`, `01`) sont
+# refusées, et ce qui doit rester ouvert le reste (`GET` dépôt 200, `POST /pulls` → 4xx de la forge)
+ssh {{ agent_name }}@<vm_ip> "curl -s --path-as-is -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8002/api/v1/repos/<owner>/<repo>/pulls/1/merge/"   # attendu : 403
 # La trace du proxy est dans le journal de son unité (bornée par journald, plus de fichier)
 ssh <admin>@<vm_ip> "journalctl -u token-proxy -n 20"
 # Côté forge : la protection de branche refuse un push direct sur la branche par défaut

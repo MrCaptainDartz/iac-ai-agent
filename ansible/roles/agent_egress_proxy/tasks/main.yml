@@ -2,10 +2,10 @@
 # tasks file for agent_egress_proxy
 # L7 front door for the agent zone: the only way out, and it applies a declared policy.
 
-- name: Get the harness user UID
+- name: Get the agent user UID
   ansible.builtin.command:
-    cmd: "id -u {{ agent_egress_proxy_harness_name }}"
-  register: agent_egress_proxy_harness_uid
+    cmd: "id -u {{ agent_egress_proxy_agent_name }}"
+  register: agent_egress_proxy_agent_uid
   changed_when: false
   when: agent_egress_proxy_enabled | default(false)
 

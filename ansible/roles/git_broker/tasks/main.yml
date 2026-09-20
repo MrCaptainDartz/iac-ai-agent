@@ -7,7 +7,7 @@
       - trust_zone_enabled | default(false)
     fail_msg: >-
       git_broker_enabled is true but trust_zone_enabled is false. The broker holds a deployment key:
-      it runs under a trust zone user, never under the harness uid.
+      it runs under a trust zone user, never under the agent uid.
   when: git_broker_enabled | default(false)
 
 # sshd hands the command to the user's shell, and trust_zone rewrites its own user's shell: one uid each.
@@ -15,13 +15,13 @@
   ansible.builtin.assert:
     that:
       - git_broker_user is match('^[a-z0-9-]+$')
-      - git_broker_user != git_broker_harness_name
+      - git_broker_user != git_broker_agent_name
       - git_broker_user != (trust_zone_user | default(broker_name | default('broker')))
       # This account's shell becomes the relay and its home this broker's: never an account you log in as.
       - git_broker_user != 'root'
       - git_broker_user != (ansible_user | default(''))
     fail_msg: >-
-      git_broker_user must be a lowercase system user, distinct from the harness user, from the uid
+      git_broker_user must be a lowercase system user, distinct from the agent user, from the uid
       the other components share, and from root or the account this play connects as: the role makes
       it the relay's shell and gives it this broker's home.
   when: git_broker_enabled | default(false)
@@ -76,7 +76,7 @@
     shell: "{{ git_broker_relay }}"
   when: git_broker_enabled | default(false)
 
-# 0700, not 0750 like the harness: the agent zone stays out of the key.
+# 0700, not 0750 like the agent account: the agent zone stays out of the key.
 - name: Restrict the broker home directory
   ansible.builtin.file:
     path: "{{ git_broker_home }}"
@@ -186,8 +186,8 @@
   ansible.builtin.file:
     path: "{{ git_broker_agent_ssh_dir }}"
     state: directory
-    owner: "{{ git_broker_harness_name }}"
-    group: "{{ git_broker_harness_name }}"
+    owner: "{{ git_broker_agent_name }}"
+    group: "{{ git_broker_agent_name }}"
     mode: '0700'
   when: git_broker_enabled | default(false)
 
@@ -198,11 +198,11 @@
     creates: "{{ git_broker_agent_key }}"
   when: git_broker_enabled | default(false)
 
-- name: Hand the placeholder key to the harness user
+- name: Hand the placeholder key to the agent user
   ansible.builtin.file:
     path: "{{ item }}"
-    owner: "{{ git_broker_harness_name }}"
-    group: "{{ git_broker_harness_name }}"
+    owner: "{{ git_broker_agent_name }}"
+    group: "{{ git_broker_agent_name }}"
     mode: '0600'
   loop:
     - "{{ git_broker_agent_key }}"
@@ -238,8 +238,8 @@
       [127.0.0.1]:{{ git_broker_ssh_port }}
       {{ git_broker_host_pub.content | b64decode | trim | regex_replace('^(\S+ \S+).*$', '\1') }}
     dest: "{{ git_broker_agent_known_hosts }}"
-    owner: "{{ git_broker_harness_name }}"
-    group: "{{ git_broker_harness_name }}"
+    owner: "{{ git_broker_agent_name }}"
+    group: "{{ git_broker_agent_name }}"
     mode: '0600'
   when: git_broker_enabled | default(false)
 
@@ -247,10 +247,10 @@
   ansible.builtin.blockinfile:
     path: "{{ git_broker_agent_ssh_dir }}/config"
     marker: "# {mark} ANSIBLE MANAGED BLOCK git-broker"
-    block: "{{ lookup('ansible.builtin.template', 'harness-ssh-config.j2') }}"
+    block: "{{ lookup('ansible.builtin.template', 'agent-ssh-config.j2') }}"
     create: true
-    owner: "{{ git_broker_harness_name }}"
-    group: "{{ git_broker_harness_name }}"
+    owner: "{{ git_broker_agent_name }}"
+    group: "{{ git_broker_agent_name }}"
     mode: '0600'
   when: git_broker_enabled | default(false)
 
@@ -259,10 +259,10 @@
   ansible.builtin.blockinfile:
     path: "{{ git_broker_agent_gitconfig }}"
     marker: "# {mark} ANSIBLE MANAGED BLOCK git-broker"
-    block: "{{ lookup('ansible.builtin.template', 'harness-gitconfig.j2') }}"
+    block: "{{ lookup('ansible.builtin.template', 'agent-gitconfig.j2') }}"
     create: true
-    owner: "{{ git_broker_harness_name }}"
-    group: "{{ git_broker_harness_name }}"
+    owner: "{{ git_broker_agent_name }}"
+    group: "{{ git_broker_agent_name }}"
     mode: '0644'
   when: git_broker_enabled | default(false)
 
@@ -290,14 +290,14 @@
       a privilege separation directory it cannot reach.
   when: git_broker_enabled | default(false)
 
-# Run as the harness: only its own key, alias and pinned host key say anything about the agent's path.
+# Run as the agent user: only its own key, alias and pinned host key say anything about the agent's path.
 - name: Check that the agent zone reaches a declared repository
   ansible.builtin.command:
     cmd: "timeout 60 git ls-remote ssh://{{ git_broker_agent_ssh_alias }}/{{ git_broker_repo_paths[0] | regex_replace('^/', '') }}"
   become: true
-  become_user: "{{ git_broker_harness_name }}"
+  become_user: "{{ git_broker_agent_name }}"
   environment:
-    HOME: "/home/{{ git_broker_harness_name }}"
+    HOME: "/home/{{ git_broker_agent_name }}"
     GIT_TERMINAL_PROMPT: "0"
   register: git_broker_lsremote
   changed_when: false
@@ -319,9 +319,9 @@
   ansible.builtin.command:
     cmd: "ssh -o BatchMode=yes {{ git_broker_agent_ssh_alias }} id"
   become: true
-  become_user: "{{ git_broker_harness_name }}"
+  become_user: "{{ git_broker_agent_name }}"
   environment:
-    HOME: "/home/{{ git_broker_harness_name }}"
+    HOME: "/home/{{ git_broker_agent_name }}"
   register: git_broker_shell_refusal
   changed_when: false
   failed_when: >-

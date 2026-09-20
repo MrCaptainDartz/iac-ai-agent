@@ -1,6 +1,6 @@
 ---
 # tasks file for inference_gateway
-# Loopback HTTP front door: the harness holds no provider key and names no provider model.
+# Loopback HTTP front door: the agent holds no provider key and names no provider model.
 
 - name: Resolve the gateway user
   ansible.builtin.command:
