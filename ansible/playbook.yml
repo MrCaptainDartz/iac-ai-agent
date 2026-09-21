@@ -58,7 +58,7 @@
           ansible.builtin.file:
             path: "{{ git_broker_ssh_key_src | dirname }}"
             state: directory
-            mode: '0700'
+            mode: "0700"
 
         - name: Generate the deployment key and its public half
           ansible.builtin.command:
@@ -126,6 +126,35 @@
         - git_broker_enabled | default(false)
         - git_broker_api_upstream | default('') | length > 0
 
+    - name: Pre-flight check that this VM reaches the observability endpoints
+      ansible.builtin.wait_for:
+        host: "{{ item | urlsplit('hostname') }}"
+        port: "{{ item | urlsplit('port') | default(443, true) }}"
+        timeout: 10
+        msg: >-
+          {{ item }} unreachable from this VM — the relay for it can only fail: open it, and give the
+          VM the resolver that knows this name.
+      loop:
+        - "{{ observability_relay_prometheus_upstream | default('') }}"
+        - "{{ observability_relay_alertmanager_upstream | default('') }}"
+        - "{{ observability_relay_grafana_upstream | default('') }}"
+      when:
+        - observability_relay_enabled | default(false)
+        - token_proxy_enabled | default(false)
+        - item | length > 0
+
+    - name: Pre-flight check that the Grafana relay has its service-account token
+      ansible.builtin.assert:
+        that:
+          - token_proxy_enabled | default(false)
+          - (lookup('ansible.builtin.file', observability_relay_grafana_token_src | default(''), errors='ignore') | default('', true) | trim) | length > 0
+        fail_msg: >-
+          observability_relay_grafana_upstream declared, but the relay is incomplete: token_proxy_enabled false,
+          or the service-account token unreadable (README) — or drop Grafana for the two that need no credential.
+      when:
+        - observability_relay_enabled | default(false)
+        - observability_relay_grafana_upstream | default('') | length > 0
+
     # Provisioning needs the network this filter removes: lifted for the run, re-applied last — a run failing before that leaves the agent zone open.
     - name: Check whether the agent egress filter is currently loaded
       ansible.builtin.command:
@@ -157,11 +186,12 @@
     - inference_gateway
     - agent_egress_proxy
     - k8s_broker
-    # The git broker declares what needs a credential; the token proxy serves it on the loopback.
     - git_broker
+    - observability_relay
     - role: token_proxy
       vars:
-        token_proxy_injections: "{{ git_broker_injections | default([]) }}"
+        # The single hand-off point: every declaring role contributes its entries here.
+        token_proxy_injections: "{{ (git_broker_injections | default([])) + (observability_relay_injections | default([])) }}"
     # Last: locks the sandbox down and closes the pre_tasks window.
     - agent_egress
   post_tasks:

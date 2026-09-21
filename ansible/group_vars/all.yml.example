@@ -114,6 +114,14 @@ git_broker_lfs_basic_user: ""            # LFS wants Basic <base64(user:token)>:
 # The forge token (API and LFS): a secret, so a file; one line, with no "$" (nginx has no escape for it).
 git_broker_token_src: "{{ inventory_dir }}/../files/git-broker.token"
 
+# Observability relays: read-only access to what the agent's own systems report (requires token_proxy).
+observability_relay_enabled: false
+observability_relay_prometheus_upstream: ""   # a bare origin: https://prometheus.example.com
+observability_relay_alertmanager_upstream: "" # https://alertmanager.example.com
+observability_relay_grafana_upstream: ""      # https://grafana.example.com
+# Grafana authenticates; Prometheus and Alertmanager have no authentication of their own.
+observability_relay_grafana_token_src: "{{ inventory_dir }}/../files/grafana.token"
+
 # Token injection proxy: the primitive a broker declares its endpoints into (required by git_broker).
 token_proxy_enabled: false
 token_proxy_port: 8002

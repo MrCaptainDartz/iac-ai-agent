@@ -1,0 +1,58 @@
+---
+# --- component configuration ---
+
+observability_relay_enabled: false
+# The relays are declarations: the token proxy is what serves them on the loopback.
+
+# --- the real endpoints ---
+
+observability_relay_prometheus_upstream: ""
+observability_relay_prometheus_locations: ["/api/v1/"]
+observability_relay_prometheus_probe: "/api/v1/status/buildinfo"
+observability_relay_alertmanager_upstream: ""
+observability_relay_alertmanager_locations: ["/api/v2/"]
+observability_relay_alertmanager_probe: "/api/v2/status"
+observability_relay_grafana_upstream: ""
+observability_relay_grafana_locations: ["/api/"]
+observability_relay_grafana_probe: "/api/search"
+# Grafana is the only one of the three that authenticates: a service-account token, Viewer.
+observability_relay_grafana_token_src: "{{ inventory_dir }}/../files/grafana.token"
+
+# --- refused path ---
+# The datasource proxy is a tunnel to every configured datasource: one location would open them all.
+observability_relay_grafana_refused_paths:
+  - "^/api/datasources/proxy"
+  - "^/api/admin"
+# The loaded config can carry scrape or remote-write credentials, and the admin API writes the TSDB.
+observability_relay_prometheus_refused_paths:
+  - "^/api/v1/status/config"
+  - "^/api/v1/admin"
+
+# --- derived: one entry per declared endpoint, handed to the token proxy ---
+observability_relay_prometheus_deployed: >-
+  {{ (observability_relay_enabled | bool) and (observability_relay_prometheus_upstream | length > 0)
+     and (observability_relay_prometheus_locations | length > 0) }}
+observability_relay_alertmanager_deployed: >-
+  {{ (observability_relay_enabled | bool) and (observability_relay_alertmanager_upstream | length > 0)
+     and (observability_relay_alertmanager_locations | length > 0) }}
+observability_relay_grafana_deployed: >-
+  {{ (observability_relay_enabled | bool) and (observability_relay_grafana_upstream | length > 0)
+     and (observability_relay_grafana_locations | length > 0)
+     and (observability_relay_grafana_token_src | length > 0) }}
+observability_relay_injections: >-
+  {{ ([{'locations': observability_relay_prometheus_locations,
+       'upstream': observability_relay_prometheus_upstream, 'allowed_methods': ['GET'],
+       'probe': observability_relay_prometheus_probe,
+       'refused_paths': observability_relay_prometheus_refused_paths, 'read_timeout': '120s'}]
+      if observability_relay_prometheus_deployed | bool else [])
+     + ([{'locations': observability_relay_alertmanager_locations,
+          'upstream': observability_relay_alertmanager_upstream, 'allowed_methods': ['GET'],
+          'probe': observability_relay_alertmanager_probe}]
+        if observability_relay_alertmanager_deployed | bool else [])
+     + ([{'locations': observability_relay_grafana_locations,
+          'upstream': observability_relay_grafana_upstream, 'allowed_methods': ['GET'],
+          'probe': observability_relay_grafana_probe, 'read_timeout': '120s',
+          'auth_header': 'Authorization: Bearer TOKEN',
+          'token_src': observability_relay_grafana_token_src,
+          'refused_paths': observability_relay_grafana_refused_paths}]
+        if observability_relay_grafana_deployed | bool else []) }}

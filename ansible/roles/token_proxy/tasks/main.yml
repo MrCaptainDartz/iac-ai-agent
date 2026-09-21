@@ -28,12 +28,22 @@
       inject (or set the flag to false).
   when: token_proxy_enabled | default(false)
 
-- name: Assert that every injection is complete and its token renderable
+- name: Assert that every injection has a shape
   ansible.builtin.assert:
     that:
       - item.locations | default([]) | length > 0
       - (item.upstream | default('')) is match('^https://[^/\s]+$')
-      - item.auth_header | default('') | length > 0
+    fail_msg: >-
+      The injection for '{{ item.locations | default([]) | join(', ') }}' needs locations, and an
+      https:// upstream without a path — not even '/', which would replace the path the client sent.
+  loop: "{{ token_proxy_injections }}"
+  loop_control:
+    label: "{{ item.locations | default([]) | join(', ') }}"
+  when: token_proxy_enabled | default(false)
+
+- name: Assert that every declared credential is renderable
+  ansible.builtin.assert:
+    that:
       - "' ' in (item.auth_header | default('')) and ': ' in (item.auth_header | default(''))"
       # A marker is what carries the secret: a header with neither would inject a literal value.
       - ('TOKEN_B64' in (item.auth_header | default(''))) or ('TOKEN' in (item.auth_header | default('') | replace('TOKEN_B64', '')))
@@ -44,12 +54,11 @@
       # nginx reads '$' as a variable and whitespace as the end of the line: '$' has no escape.
       - (lookup('ansible.builtin.file', item.token_src | default('/nonexistent'), errors='ignore') | default('', true) | trim) is match('^[^$\s]+$')
     fail_msg: >-
-      The injection for '{{ item.locations | default([]) | join(', ') }}' needs locations, an https://
-      upstream without a path, an auth_header carrying TOKEN or TOKEN_B64 (TOKEN_B64 with the account
-      name it encodes, basic_user), and a token_src holding one line with no '$' — nginx reads that one
-      as a variable, and has no escape for it. A quote or a backslash is accepted: the template escapes
-      them, since nginx reads those as escapes too.
-  loop: "{{ token_proxy_injections }}"
+      The injection for '{{ item.locations | default([]) | join(', ') }}' declares an auth_header, so it
+      needs one carrying TOKEN or TOKEN_B64 (TOKEN_B64 with the account name it encodes, basic_user), and
+      a token_src holding one line with no '$' — nginx reads that one as a variable, and has no escape
+      for it. A quote or a backslash is accepted: the template escapes them.
+  loop: "{{ token_proxy_injections | selectattr('auth_header', 'defined') | selectattr('auth_header', 'truthy') | list }}"
   loop_control:
     label: "{{ item.locations | default([]) | join(', ') }}"
   when: token_proxy_enabled | default(false)

@@ -89,22 +89,22 @@ git_broker_merge_refused: >-
       | map('regex_replace', '^', '^') | map('regex_replace', '$', '/pulls/[0-9]+/merge/*$') | list) }}
 # One predicate for both halves: the relay that hands the endpoint out, the injection that serves it.
 git_broker_lfs_deployed: >-
-  {{ (git_broker_lfs_enabled | bool) and (git_broker_lfs_upstream | length > 0)
+  {{ (git_broker_enabled | bool) and (git_broker_lfs_enabled | bool) and (git_broker_lfs_upstream | length > 0)
      and (git_broker_token_src | length > 0) and (git_broker_repos | length > 0) }}
 
-# Injections for nginx configuration
+# Injections for nginx configuration: gated on the flag, since the SSH half comes down on disable.
 git_broker_injections: >-
   {{ ([{'locations': git_broker_api_read_locations, 'upstream': git_broker_api_upstream,
        'auth_header': git_broker_api_auth_header, 'token_src': git_broker_token_src,
        'allowed_methods': git_broker_api_read_methods,
        'probe': git_broker_api_probe, 'ca_src': git_broker_api_ca_src}]
-      if (git_broker_api_upstream | length > 0 and git_broker_token_src | length > 0
+      if (git_broker_enabled | bool and git_broker_api_upstream | length > 0 and git_broker_token_src | length > 0
           and git_broker_api_read_locations | length > 0) else [])
      + ([{'locations': git_broker_api_proposal_locations, 'upstream': git_broker_api_upstream,
           'auth_header': git_broker_api_auth_header, 'token_src': git_broker_token_src,
           'allowed_methods': git_broker_api_proposal_methods, 'ca_src': git_broker_api_ca_src,
           'refused_paths': git_broker_merge_refused}]
-        if (git_broker_api_upstream | length > 0 and git_broker_token_src | length > 0
+        if (git_broker_enabled | bool and git_broker_api_upstream | length > 0 and git_broker_token_src | length > 0
             and git_broker_api_proposal_locations | length > 0) else [])
      + ([{'locations': git_broker_lfs_locations, 'upstream': git_broker_lfs_upstream,
           'auth_header': 'Authorization: Basic TOKEN_B64', 'token_src': git_broker_token_src,

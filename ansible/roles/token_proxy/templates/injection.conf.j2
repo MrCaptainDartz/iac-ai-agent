@@ -1,10 +1,12 @@
-# Token injection block (Ansible Managed): the agent sends no credential, this line replaces any.
+# Injection block (Ansible Managed): the agent sends no credential, this block answers for it.
 {% if entry.refused_paths | default([]) | length > 0 %}
 # Closed here, before the prefix below would admit them: a regex location wins over a prefix.
 {% for pattern in entry.refused_paths %}
 location ~ {{ pattern }} { return 403; }
 {% endfor %}
 {% endif %}
+{% set has_credential = (entry.auth_header | default('')) | length > 0 %}
+{% if has_credential %}
 {% set header_name, header_value = entry.auth_header.split(': ', 1) %}
 {% set token = lookup('ansible.builtin.file', entry.token_src) | trim %}
 {% set marker = 'TOKEN_B64' if 'TOKEN_B64' in header_value else 'TOKEN' %}
@@ -13,6 +15,7 @@ location ~ {{ pattern }} { return 403; }
 {% set value = header_value | replace(marker, secret) %}
 {# nginx reads '\' and '"' as escapes inside its quoted value: escaped here, the token travels whole. #}
 {% set value = value | replace('\\', '\\\\') | replace('"', '\\"') %}
+{% endif %}
 {% macro emit(modifier, location) %}
 
 location {{ modifier }}{{ location }} {
@@ -20,9 +23,14 @@ location {{ modifier }}{{ location }} {
     if ($token_proxy_escaped_path) { return 403; }
 
     proxy_pass {{ entry.upstream }};
+{% if has_credential %}
     proxy_set_header {{ header_name }} "{{ value }}";
 {% if header_name != 'Authorization' %}
     # A forge preferring the client's Authorization over the header it was given sees none: GitLab.
+    proxy_set_header Authorization "";
+{% endif %}
+{% else %}
+    # Nothing is injected, so the agent's own credential must not reach the upstream either.
     proxy_set_header Authorization "";
 {% endif %}
 
@@ -36,6 +44,8 @@ location {{ modifier }}{{ location }} {
 
     proxy_ssl_verify on;
     proxy_ssl_server_name on;
+    # The chain is built past the served intermediates: nginx's own default of 1 stops a step short.
+    proxy_ssl_verify_depth {{ token_proxy_ssl_verify_depth | default(5) }};
 {% if entry.ca_src | default('') | length > 0 %}
     proxy_ssl_trusted_certificate {{ token_proxy_config_dir }}/ca-{{ idx + 1 }}.pem;
 {% else %}

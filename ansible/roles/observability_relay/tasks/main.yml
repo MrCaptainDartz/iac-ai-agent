@@ -1,0 +1,21 @@
+---
+# tasks file for observability_relay
+- name: Assert the injection proxy is deployed
+  ansible.builtin.assert:
+    that:
+      - token_proxy_enabled | default(false)
+    fail_msg: >-
+      observability_relay_enabled is true but token_proxy_enabled is false. These relays are
+      declarations: the proxy is what serves them on the loopback, with the agent holding no credential.
+  when: observability_relay_enabled | default(false)
+
+# An enabled capability that declares nothing is a silent no-op, not a policy.
+- name: Assert that at least one endpoint is declared
+  ansible.builtin.assert:
+    that:
+      - observability_relay_injections | length > 0
+    fail_msg: >-
+      observability_relay_enabled is true but no upstream is declared. Declare at least one of
+      observability_relay_prometheus_upstream, observability_relay_alertmanager_upstream or
+      observability_relay_grafana_upstream (or set the flag to false).
+  when: observability_relay_enabled | default(false)
